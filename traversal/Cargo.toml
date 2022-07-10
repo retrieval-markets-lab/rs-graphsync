@@ -1,0 +1,21 @@
+[package]
+name = "ipld-traversal"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+libipld = { version = "0.13.1", features = ["serde-codec"] }
+serde_ipld_dagcbor = "0.1.2"
+indexmap = { version = "1.8.0", features = ["serde"] }
+smallvec = "1.8.0"
+thiserror = "1.0"
+unixfs-v1 = { git = "https://github.com/ipfs-rust/unixfsv1" }
+integer-encoding = { version = "3.0", default-features = false }
+anyhow = "1.0.51"
+
+[dev-dependencies]
+hex = "0.4.3"
+
