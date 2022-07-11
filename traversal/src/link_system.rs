@@ -27,18 +27,18 @@ where
         }
         Err(anyhow!("not found"))
     }
-    pub fn store(&self, p: Prefix, n: Ipld) -> Result<Cid> {
+    pub fn store(&self, p: Prefix, n: &Ipld) -> Result<Cid> {
         let codec = IpldCodec::try_from(p.codec)?;
         let mut buf = Vec::new();
-        Ipld::encode(&n, codec, &mut buf)?;
+        Ipld::encode(n, codec, &mut buf)?;
         let cid = p.to_cid(&buf)?;
         self.bstore.put_keyed(&cid, &buf)?;
         Ok(cid)
     }
-    pub fn store_plus_raw(&self, p: Prefix, n: Ipld) -> Result<(Cid, Vec<u8>)> {
+    pub fn store_plus_raw(&self, p: Prefix, n: &Ipld) -> Result<(Cid, Vec<u8>)> {
         let codec = IpldCodec::try_from(p.codec)?;
         let mut buf = Vec::new();
-        Ipld::encode(&n, codec, &mut buf)?;
+        Ipld::encode(n, codec, &mut buf)?;
         let cid = p.to_cid(&buf)?;
         self.bstore.put_keyed(&cid, &buf)?;
         Ok((cid, buf))
@@ -72,6 +72,15 @@ pub struct Prefix {
 }
 
 impl Prefix {
+    // default to cid v1 with default hash length
+    pub fn new(codec: u64, mh_type: u64) -> Self {
+        Prefix {
+            version: Version::V1,
+            codec,
+            mh_type,
+            mh_len: 0,
+        }
+    }
     pub fn new_from_bytes(data: &[u8]) -> Result<Prefix> {
         let mut cur = Cursor::new(data);
 
@@ -122,7 +131,7 @@ impl From<Cid> for Prefix {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::blockstore::{Blockstore, MemoryBlockstore};
+    use crate::blockstore::MemoryBlockstore;
     use libipld::ipld;
 
     // same test as go-ipld-prime
@@ -135,13 +144,11 @@ mod tests {
             "hello": "world",
         });
         lsys.store(
-            Prefix {
-                version: Version::V1,
-                codec: 0x71,   // dag-cbor
-                mh_type: 0x13, // sha-512
-                mh_len: 64,
-            },
-            value.clone(),
+            Prefix::new(
+                0x71, // dag-cbor
+                0x13, // sha-512
+            ),
+            &value,
         )
         .unwrap();
         let key: Cid = "bafyrgqhai26anf3i7pips7q22coa4sz2fr4gk4q4sqdtymvvjyginfzaqewveaeqdh524nsktaq43j65v22xxrybrtertmcfxufdam3da3hbk".parse().unwrap();

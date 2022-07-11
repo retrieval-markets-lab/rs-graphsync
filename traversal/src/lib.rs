@@ -212,11 +212,10 @@ fn select_next_entries(ipld: Ipld, selector: Selector) -> Vec<(Ipld, Selector)> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::blockstore::{Blockstore, MemoryBlockstore};
+    use crate::blockstore::MemoryBlockstore;
     use crate::link_system::{LinkSystem, Prefix};
     use crate::selector::{RecursionLimit, Selector};
     use libipld::cbor::DagCborCodec;
-    use libipld::cid::Version;
     use libipld::ipld;
     use libipld::multihash::Code;
 
@@ -225,26 +224,21 @@ mod tests {
         let store = MemoryBlockstore::new();
         let lsys = LinkSystem::new(store);
 
-        let prefix = Prefix {
-            version: Version::V1,
-            codec: DagCborCodec.into(),
-            mh_type: Code::Sha2_256.into(),
-            mh_len: usize::MAX,
-        };
+        let prefix = Prefix::new(DagCborCodec.into(), Code::Sha2_256.into());
 
         let leaf1 = ipld!({ "name": "leaf1", "size": 12 });
-        let (leaf1_cid, leaf1_blk) = lsys.store_plus_raw(prefix, leaf1).unwrap();
+        let (leaf1_cid, leaf1_blk) = lsys.store_plus_raw(prefix, &leaf1).unwrap();
 
         // leaf2 is not present in the blockstore
         let leaf2 = ipld!({ "name": "leaf2", "size": 6 });
-        let (leaf2_cid, leaf2_blk) = lsys.store_plus_raw(prefix, leaf2).unwrap();
+        let (leaf2_cid, leaf2_blk) = lsys.store_plus_raw(prefix, &leaf2).unwrap();
 
         let parent = ipld!({
             "children": [leaf1_cid, leaf2_cid],
             "favouriteChild": leaf2_cid,
             "name": "parent",
         });
-        let (root, parent_blk) = lsys.store_plus_raw(prefix, parent).unwrap();
+        let (root, parent_blk) = lsys.store_plus_raw(prefix, &parent).unwrap();
 
         let selector = Selector::ExploreRecursive {
             limit: RecursionLimit::None,
