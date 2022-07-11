@@ -1,4 +1,5 @@
 mod messages;
+mod response_builder;
 
 #[cfg(test)]
 mod tests {
