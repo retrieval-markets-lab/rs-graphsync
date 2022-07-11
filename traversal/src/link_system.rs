@@ -43,6 +43,13 @@ where
         self.bstore.put_keyed(&cid, &buf)?;
         Ok((cid, buf))
     }
+    pub fn compute_link(&self, p: Prefix, n: &Ipld) -> Result<Cid> {
+        let codec = IpldCodec::try_from(p.codec)?;
+        let mut buf = Vec::new();
+        Ipld::encode(n, codec, &mut buf)?;
+        let cid = p.to_cid(&buf)?;
+        Ok(cid)
+    }
 }
 
 pub trait BlockLoader {

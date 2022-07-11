@@ -57,8 +57,8 @@ pub struct GraphSyncBlock {
 
 #[derive(Debug, Clone, PartialEq, Serialize_tuple, Deserialize_tuple)]
 pub struct GraphSyncLinkData {
-    link: Cid,
-    action: LinkAction,
+    pub link: Cid,
+    pub action: LinkAction,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

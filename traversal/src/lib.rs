@@ -42,7 +42,7 @@ impl<L> Iterator for BlockIterator<L>
 where
     L: BlockLoader,
 {
-    type Item = Result<Vec<u8>, IterError>;
+    type Item = Result<(Cid, Vec<u8>), IterError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if let Some(cid) = self.start.take() {
@@ -104,7 +104,7 @@ where
         &mut self,
         mut ipld: Ipld,
         mut selector: Selector,
-    ) -> Option<Result<Vec<u8>, IterError>> {
+    ) -> Option<Result<(Cid, Vec<u8>), IterError>> {
         let maybe_block = self.maybe_resolve_link(&mut ipld);
 
         if let Selector::ExploreInterpretAs { next, reifier } = selector.clone() {
@@ -134,23 +134,25 @@ where
         }
     }
 
-    fn maybe_resolve_link(&mut self, ipld: &mut Ipld) -> Option<Result<Vec<u8>, IterError>> {
+    fn maybe_resolve_link(&mut self, ipld: &mut Ipld) -> Option<Result<(Cid, Vec<u8>), IterError>> {
         let mut result = None;
         while let Ipld::Link(cid) = ipld {
+            let c = *cid;
             if let Some(ref mut seen) = self.seen {
-                if !seen.insert(*cid) {
+                if !seen.insert(c) {
                     break;
                 }
             }
-            let (node, block) = match self.loader.load_plus_raw(*cid) {
-                Ok((node, block)) => (node, block),
-                Err(_) => return Some(Err(IterError::NotFound(*cid))),
+            let (node, block) = match self.loader.load_plus_raw(c) {
+                Ok(nb_tuple) => nb_tuple,
+                Err(_) => return Some(Err(IterError::NotFound(c))),
             };
             *ipld = node;
-            result = Some(Ok(block));
+            result = Some(Ok((c, block)));
         }
         result
     }
+
     fn push(&mut self, ipld: Ipld, selector: Selector) {
         self.stack_list
             .push(select_next_entries(ipld, selector).into_iter());
@@ -249,16 +251,16 @@ mod tests {
         };
         let mut it = BlockIterator::new(lsys, root, selector);
 
-        let first = it.next().unwrap().unwrap();
+        let (_, first) = it.next().unwrap().unwrap();
         assert_eq!(first, parent_blk);
 
-        let second = it.next().unwrap().unwrap();
+        let (_, second) = it.next().unwrap().unwrap();
         assert_eq!(second, leaf1_blk);
 
-        let third = it.next().unwrap().unwrap();
+        let (_, third) = it.next().unwrap().unwrap();
         assert_eq!(third, leaf2_blk);
 
-        let last = it.next().unwrap().unwrap();
+        let (_, last) = it.next().unwrap().unwrap();
         assert_eq!(last, leaf2_blk);
 
         let end = it.next();
