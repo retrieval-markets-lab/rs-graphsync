@@ -1,5 +1,5 @@
 [package]
-name = "ipld-traversal"
+name = "ipld_traversal"
 version = "0.1.0"
 edition = "2021"
 
