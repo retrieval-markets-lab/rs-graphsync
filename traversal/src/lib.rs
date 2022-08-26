@@ -6,13 +6,14 @@ pub mod selector;
 pub mod unixfs;
 
 use libipld::{Cid, Ipld};
-use link_system::BlockLoader;
 use path_segment::PathSegment;
-use selector::Selector;
 use smallvec::SmallVec;
 use std::{collections::HashSet, vec};
 use thiserror::Error;
 use unixfs::resolve_unixfs;
+
+pub use link_system::{BlockLoader, LinkSystem, Prefix};
+pub use selector::Selector;
 
 #[derive(Error, Debug, PartialEq)]
 pub enum IterError {
