@@ -1,11 +1,8 @@
 mod messages;
-mod response_builder;
+mod network;
+mod request;
+mod response;
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn it_works() {
-        let result = 2 + 2;
-        assert_eq!(result, 4);
-    }
-}
+pub use crate::network::Behaviour;
+pub use crate::request::Request;
+pub use crate::response::{Response, StatusCode};

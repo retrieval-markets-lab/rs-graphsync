@@ -8,6 +8,7 @@ use libipld::codec_impl::IpldCodec;
 use libipld::{Cid, Ipld};
 use std::io::Cursor;
 
+#[derive(Clone)]
 pub struct LinkSystem<BS> {
     bstore: BS,
 }

@@ -3,7 +3,11 @@ use libipld::{
     cid::multihash::{self, MultihashDigest},
     Cid,
 };
-use std::{cell::RefCell, collections::HashMap, rc::Rc};
+use std::{
+    collections::HashMap,
+    rc::Rc,
+    sync::{Arc, Mutex},
+};
 
 // Same block/blockstore implementation as the fvm.
 // Will import from there once it gets published separately.
@@ -207,7 +211,7 @@ where
 
 #[derive(Debug, Default, Clone)]
 pub struct MemoryBlockstore {
-    blocks: RefCell<HashMap<Cid, Vec<u8>>>,
+    blocks: Arc<Mutex<HashMap<Cid, Vec<u8>>>>,
 }
 
 impl MemoryBlockstore {
@@ -218,15 +222,15 @@ impl MemoryBlockstore {
 
 impl Blockstore for MemoryBlockstore {
     fn has(&self, k: &Cid) -> Result<bool> {
-        Ok(self.blocks.borrow().contains_key(k))
+        Ok(self.blocks.lock().unwrap().contains_key(k))
     }
 
     fn get(&self, k: &Cid) -> Result<Option<Vec<u8>>> {
-        Ok(self.blocks.borrow().get(k).cloned())
+        Ok(self.blocks.lock().unwrap().get(k).cloned())
     }
 
     fn put_keyed(&self, k: &Cid, block: &[u8]) -> Result<()> {
-        self.blocks.borrow_mut().insert(*k, block.into());
+        self.blocks.lock().unwrap().insert(*k, block.into());
         Ok(())
     }
 }
