@@ -1,11 +1,13 @@
+use crate::loader::ReconciledLoader;
 use crate::messages::{Message, MsgWriter};
 use crate::request::{Request, RequestId};
 use crate::response::StatusCode;
-use futures::channel::{mpsc, oneshot};
-use futures::sink::SinkExt;
 use futures::{future::BoxFuture, prelude::*, stream::unfold, stream::BoxStream};
-use ipld_traversal::{BlockIterator, BlockLoader, Prefix, Selector};
-use libipld::Cid;
+use ipld_traversal::{
+    blockstore::Blockstore, link_system::LinkSystem, BlockIterator, IpldTraversal, IterError,
+    Prefix, Selector,
+};
+use libipld::{Cid, Ipld};
 use libp2p::core::upgrade::{InboundUpgrade, OutboundUpgrade, UpgradeInfo};
 use libp2p::swarm::{
     dial_opts::DialOpts, ConnectionHandler, ConnectionHandlerEvent, ConnectionHandlerUpgrErr,
@@ -25,60 +27,11 @@ use std::{
     task::Poll,
 };
 
-#[derive(Clone)]
-pub struct Client {
-    sender: mpsc::Sender<Command>,
-}
-
-impl Client {
-    /// Listen for incoming connections on the given address
-    pub async fn start(&mut self, addr: Multiaddr) -> anyhow::Result<()> {
-        let (sender, receiver) = oneshot::channel();
-        self.sender
-            .send(Command::Start { addr, sender })
-            .await
-            .expect("Command receiver not to be dropped");
-        receiver.await.expect("Sender not to be dropped")
-    }
-    /// Pull the content for the given root from the given peer
-    pub async fn pull(
-        &mut self,
-        addr: Multiaddr,
-        root: Cid,
-        selector: Selector,
-    ) -> anyhow::Result<()> {
-        let (sender, receiver) = oneshot::channel();
-        self.sender
-            .send(Command::Pull {
-                addr,
-                root,
-                selector,
-                sender,
-            })
-            .await
-            .expect("Command receiver not to be dropped");
-        receiver.await.expect("Sender not to be dropped")
-    }
-}
-
-#[derive(Debug)]
-enum Command {
-    Start {
-        addr: Multiaddr,
-        sender: oneshot::Sender<anyhow::Result<()>>,
-    },
-    Pull {
-        addr: Multiaddr,
-        root: Cid,
-        selector: Selector,
-        sender: oneshot::Sender<anyhow::Result<()>>,
-    },
-}
-
 #[derive(Debug)]
 pub enum GraphSyncEvent {
     Accepted { peer_id: PeerId, request: Request },
-    Received { peer_id: PeerId },
+    Completed { id: RequestId },
+    Block { id: RequestId, data: Ipld },
     Sent { peer_id: PeerId },
     Error { peer_id: PeerId },
 }
@@ -95,60 +48,90 @@ enum Tx {
         root: Cid,
         selector: Selector,
     },
-    Open {
-        observed: Multiaddr,
-        writer: MsgWriter<NegotiatedSubstream>,
-    },
     Sending {
         fut: BoxFuture<'static, io::Result<()>>,
     },
 }
 
-pub struct Behaviour<L> {
-    connected: HashMap<PeerId, HashMap<ConnectionId, Multiaddr>>,
-    addresses: HashMap<PeerId, SmallVec<[Multiaddr; 4]>>,
-    requests: HashMap<PeerId, Tx>,
-    events: VecDeque<NetworkBehaviourAction<GraphSyncEvent, HandlerProto>>,
-    blocks: L,
+enum Traversal<L> {
+    Local {
+        id: RequestId,
+        peer: PeerId,
+        request: Request,
+        blocks: IpldTraversal<L>,
+    },
+    Remote {
+        id: RequestId,
+        peer: PeerId,
+        blocks: IpldTraversal<L>,
+    },
 }
 
-impl<L> Behaviour<L>
+pub struct Behaviour<BS> {
+    // Keep track of open connections, this is helpful to know if
+    // a peer should be dialed or not.
+    connected: HashMap<PeerId, HashMap<ConnectionId, Multiaddr>>,
+    // Sort of address book for dialing peers.
+    addresses: HashMap<PeerId, SmallVec<[Multiaddr; 4]>>,
+    // Keep track of ongoing requests to remote peers.
+    requests: HashMap<PeerId, Tx>,
+    // Events to be yielded in the behaviour poll.
+    events: VecDeque<NetworkBehaviourAction<GraphSyncEvent, HandlerProto>>,
+    // Ongoing traversals, may be local or injesting blocks from remote peers.
+    traversals: VecDeque<Traversal<ReconciledLoader<BS>>>,
+    // loaders for each traversal.
+    loaders: HashMap<RequestId, ReconciledLoader<BS>>,
+    // Blockstore for creating link systems for each traversals.
+    blocks: BS,
+}
+
+impl<BS> Behaviour<BS>
 where
-    L: BlockLoader + Send + Clone + 'static,
+    BS: Blockstore + Send + Clone + 'static,
 {
-    pub fn new(blocks: L) -> Self {
+    pub fn new(blocks: BS) -> Self {
         Behaviour {
             connected: HashMap::new(),
             addresses: HashMap::new(),
             events: VecDeque::new(),
             requests: HashMap::new(),
+            traversals: VecDeque::new(),
+            loaders: HashMap::new(),
             blocks,
         }
     }
 
+    // Add to the address book for dialing. Not sure if really needed,
+    // this could be handled by the swarm or some other behaviour.
     pub fn add_address(&mut self, peer: &PeerId, address: Multiaddr) {
         self.addresses.entry(*peer).or_default().push(address);
     }
 
+    // Initiate a new traversal
     pub fn request(&mut self, peer: PeerId, request: Request) {
-        if self
-            .requests
-            .insert(peer, Tx::PendingDial { request })
-            .is_none()
-            && !self.connected.contains_key(&peer)
-        {
-            let handler = self.new_handler();
-            self.events.push_back(NetworkBehaviourAction::Dial {
-                opts: DialOpts::peer_id(peer).build(),
-                handler,
+        let id = *request.id();
+        // Requests should always have a root and selector, should prob error out
+        // or enforce it in the Request builder.
+        if let Some((root, selector)) = request.root().zip(request.selector()) {
+            // reconciled loader is local by default and will turn online when encountering
+            // a link that does not have a local block.
+            let loader = ReconciledLoader::new(self.blocks.clone());
+            let it = IpldTraversal::new(loader.clone(), *root, selector.clone())
+                .restart_missing_link(true);
+            self.traversals.push_back(Traversal::Local {
+                id,
+                peer,
+                blocks: it,
+                request,
             });
+            self.loaders.insert(id, loader);
         }
     }
 }
 
-impl<L> NetworkBehaviour for Behaviour<L>
+impl<BS> NetworkBehaviour for Behaviour<BS>
 where
-    L: BlockLoader + Send + Clone + 'static,
+    BS: Blockstore + Send + Clone + 'static,
 {
     type ConnectionHandler = HandlerProto;
     type OutEvent = GraphSyncEvent;
@@ -249,17 +232,21 @@ where
                         root,
                         selector,
                     } => {
-                        let it = BlockIterator::new(self.blocks.clone(), root, selector);
+                        let it = BlockIterator::new(
+                            LinkSystem::new(self.blocks.clone()),
+                            root,
+                            selector,
+                        );
                         let fut = writer.write(req_id, it).boxed();
                         self.requests.insert(peer_id, Tx::Sending { fut });
                     }
                     _ => (),
                 }
             }
-            HandlerEvent::Completed => {
-                self.events.push_back(NetworkBehaviourAction::GenerateEvent(
-                    GraphSyncEvent::Received { peer_id },
-                ));
+            HandlerEvent::Partial(id, (cid, block)) => {
+                self.loaders
+                    .get(&id)
+                    .and_then(|loader| Some(loader.injest(cid, block)));
             }
             _ => (),
         }
@@ -273,6 +260,101 @@ where
         if let Some(event) = self.events.pop_front() {
             return Poll::Ready(event);
         }
+
+        if let Some(t) = self.traversals.pop_front() {
+            match t {
+                Traversal::Local {
+                    id,
+                    peer,
+                    request,
+                    mut blocks,
+                } => {
+                    match blocks.next() {
+                        Some(Ok(data)) => {
+                            // We have the block locally, continue without requesting from remote.
+                            let event = GraphSyncEvent::Block { id, data };
+                            self.traversals.push_back(Traversal::Local {
+                                id,
+                                request,
+                                peer,
+                                blocks,
+                            });
+                            return Poll::Ready(NetworkBehaviourAction::GenerateEvent(event));
+                        }
+                        Some(Err(err)) => {
+                            match err {
+                                IterError::NotFound(_cid) => {
+                                    self.loaders
+                                        .entry(*request.id())
+                                        .and_modify(|loader| loader.set_online(true));
+                                    self.requests.insert(peer, Tx::PendingDial { request });
+                                    self.traversals.push_back(Traversal::Remote {
+                                        id,
+                                        peer,
+                                        blocks,
+                                    });
+                                    if !self.connected.contains_key(&peer) {
+                                        let handler = self.new_handler();
+                                        return Poll::Ready(NetworkBehaviourAction::Dial {
+                                            opts: DialOpts::peer_id(peer).build(),
+                                            handler,
+                                        });
+                                    }
+                                }
+                                _ => {
+                                    // TODO: send a failure message
+                                    return Poll::Ready(NetworkBehaviourAction::GenerateEvent(
+                                        GraphSyncEvent::Error { peer_id: peer },
+                                    ));
+                                }
+                            }
+                        }
+                        None => {
+                            let event = GraphSyncEvent::Completed { id };
+                            return Poll::Ready(NetworkBehaviourAction::GenerateEvent(event));
+                        }
+                    }
+                }
+                Traversal::Remote {
+                    id,
+                    peer,
+                    mut blocks,
+                } => {
+                    match blocks.next() {
+                        Some(Ok(data)) => {
+                            // We have the block locally, continue without requesting from remote.
+                            let event = GraphSyncEvent::Block { id, data };
+                            self.traversals
+                                .push_back(Traversal::Remote { id, peer, blocks });
+                            return Poll::Ready(NetworkBehaviourAction::GenerateEvent(event));
+                        }
+                        Some(Err(err)) => {
+                            match err {
+                                IterError::NotFound(_cid) => {
+                                    // Try again
+                                    self.traversals.push_back(Traversal::Remote {
+                                        id,
+                                        peer,
+                                        blocks,
+                                    });
+                                }
+                                _ => {
+                                    // TODO: send a failure message
+                                    return Poll::Ready(NetworkBehaviourAction::GenerateEvent(
+                                        GraphSyncEvent::Error { peer_id: peer },
+                                    ));
+                                }
+                            }
+                        }
+                        None => {
+                            let event = GraphSyncEvent::Completed { id };
+                            return Poll::Ready(NetworkBehaviourAction::GenerateEvent(event));
+                        }
+                    }
+                }
+            };
+        }
+
         // Get the first peer for which we have an open connection and a pending request
         let peer = self.requests.keys().find_map(|peer| {
             if self.connected.contains_key(peer) {
@@ -318,7 +400,6 @@ where
                         ));
                     }
                 },
-                _ => (),
             };
         }
         Poll::Pending
@@ -364,11 +445,11 @@ pub struct GraphSyncHandler {
 pub enum HandlerEvent {
     NewRequest(Request),
     NewResponse(MsgWriter<NegotiatedSubstream>),
-    Partial(Cid, Vec<u8>),
-    Missing(Cid),
-    NotFound,
-    Rejected,
-    Completed,
+    Partial(RequestId, (Cid, Vec<u8>)),
+    Missing(RequestId, Cid),
+    NotFound(RequestId),
+    Rejected(RequestId),
+    Completed(RequestId),
 }
 
 #[derive(Debug)]
@@ -544,13 +625,13 @@ where
 }
 //
 // filter out events to bubble up to the client notifying why a request is finished.
-fn final_event(status: StatusCode) -> Option<HandlerEvent> {
+fn final_event(id: RequestId, status: StatusCode) -> Option<HandlerEvent> {
     match status {
         StatusCode::RequestCompletedFull | StatusCode::RequestCompletedPartial => {
-            Some(HandlerEvent::Completed)
+            Some(HandlerEvent::Completed(id))
         }
-        StatusCode::RequestFailedContentNotFound => Some(HandlerEvent::NotFound),
-        StatusCode::RequestRejected => Some(HandlerEvent::Rejected),
+        StatusCode::RequestFailedContentNotFound => Some(HandlerEvent::NotFound(id)),
+        StatusCode::RequestRejected => Some(HandlerEvent::Rejected(id)),
         _ => None,
     }
 }
@@ -562,6 +643,8 @@ where
     unfold(socket, |mut r| async move {
         if let Ok(msg) = Message::from_net(&mut r).await {
             match msg.into_inner() {
+                // Have not encountered a case where a provider would request data to a client
+                // while sending blocks for some previous request so won't handle that yet.
                 (Some(requests), _, _) => {
                     let mut events = Vec::new();
                     for req in requests {
@@ -591,13 +674,13 @@ where
                         if let Some(meta) = res.metadata {
                             for data in meta {
                                 let event = match blk_map.remove(&data.link) {
-                                    Some(blk) => HandlerEvent::Partial(data.link, blk),
-                                    None => HandlerEvent::Missing(data.link),
+                                    Some(blk) => HandlerEvent::Partial(res.id, (data.link, blk)),
+                                    None => HandlerEvent::Missing(res.id, data.link),
                                 };
                                 events.push(event);
                             }
                         }
-                        if let Some(event) = final_event(res.status) {
+                        if let Some(event) = final_event(res.id, res.status) {
                             events.push(event);
                         }
                     }
@@ -606,12 +689,31 @@ where
 
                     return Some((events, r));
                 }
+                // we could receive a response with no blocks in the case where the
+                // provider is missing some.
+                (_, Some(responses), None) => {
+                    let mut events = Vec::new();
+                    for res in responses {
+                        if let Some(meta) = res.metadata {
+                            for data in meta {
+                                events.push(HandlerEvent::Missing(res.id, data.link));
+                            }
+                        }
+                        if let Some(event) = final_event(res.id, res.status) {
+                            events.push(event);
+                        }
+                    }
+
+                    return Some((events, r));
+                }
                 _ => (),
             };
         }
         None
     })
+    // flatten events so they come in one at a time
     .flat_map(stream::iter)
+    // avoid calling unfold again on a closed pipe
     .fuse()
 }
 
@@ -629,7 +731,8 @@ where
 mod tests {
     use super::*;
     use crate::request::Request;
-    use futures::pin_mut;
+    use crate::resolver::resolve_raw_bytes;
+    use futures::{channel::oneshot, pin_mut, prelude::*};
     use ipld_traversal::{blockstore::MemoryBlockstore, link_system::LinkSystem};
     use libp2p::core::{
         identity,
@@ -696,7 +799,7 @@ mod tests {
             let msg = Message::from(req);
 
             let socket = transport.dial(rx.await.unwrap()).unwrap().await.unwrap();
-            let response = apply_outbound(
+            let _response = apply_outbound(
                 socket,
                 GraphSyncProtocol::outbound(msg),
                 upgrade::Version::V1,
@@ -726,31 +829,99 @@ mod tests {
     }
 
     #[test]
+    fn offline_request() {
+        use ipld_traversal::{link_system::Prefix, selector::RecursionLimit};
+        use libipld::{ipld, Ipld};
+        use rand::prelude::*;
+
+        let (pubkey, tp) = transport();
+        let peer_id = pubkey.to_peer_id();
+        let store = MemoryBlockstore::new();
+        let lsys = LinkSystem::new(store.clone());
+
+        const CHUNK_SIZE: usize = 250 * 1024;
+
+        let mut bytes = vec![0u8; 3 * CHUNK_SIZE];
+        thread_rng().fill(&mut bytes[..]);
+
+        let mut chunks = bytes.chunks(CHUNK_SIZE);
+
+        let links: Vec<Ipld> = chunks
+            .map(|chunk| {
+                let leaf = Ipld::Bytes(chunk.to_vec());
+                let cid = lsys
+                    .store(Prefix::new(0x55, 0x13), &leaf)
+                    .expect("link system should store leaf node");
+                let link = ipld!({
+                    "Hash": cid,
+                    "Tsize": CHUNK_SIZE,
+                });
+                link
+            })
+            .collect();
+
+        let root_node = ipld!({
+            "Links": links,
+        });
+
+        let root = lsys
+            .store(Prefix::new(0x71, 0x13), &root_node)
+            .expect("link system to store root node");
+
+        let mut swarm = Swarm::new(tp, Behaviour::new(store), peer_id);
+
+        let client = swarm.behaviour_mut();
+
+        let selector = Selector::ExploreRecursive {
+            limit: RecursionLimit::None,
+            sequence: Box::new(Selector::ExploreAll {
+                next: Box::new(Selector::ExploreRecursiveEdge),
+            }),
+            current: None,
+        };
+
+        let req = Request::builder()
+            .root(root)
+            .selector(selector)
+            .build()
+            .unwrap();
+
+        let (pubkey, _) = transport();
+        let peer2 = pubkey.to_peer_id();
+
+        client.request(peer2, req.clone());
+
+        async_std::task::block_on(async move {
+            let data = resolve_raw_bytes(*req.id(), swarm.by_ref()).await;
+            assert_eq!(data, bytes);
+        });
+    }
+
+    #[test]
     fn behaviour_pull() {
         use ipld_traversal::{link_system::Prefix, selector::RecursionLimit};
         use libipld::{ipld, Ipld};
         use rand::prelude::*;
 
+        const CHUNK_SIZE: usize = 250 * 1024;
+
+        let mut bytes = vec![0u8; 3 * CHUNK_SIZE];
+        thread_rng().fill(&mut bytes[..]);
+
         let (mut swarm1, peer1, root) = {
             let (pubkey, transport) = transport();
             let peer_id = pubkey.to_peer_id();
             let store = MemoryBlockstore::new();
-            let lsys = LinkSystem::new(store);
-
-            const CHUNK_SIZE: usize = 250 * 1024;
-
-            let mut bytes = vec![0u8; 3 * CHUNK_SIZE];
-            thread_rng().fill(&mut bytes[..]);
+            let lsys = LinkSystem::new(store.clone());
 
             let mut chunks = bytes.chunks(CHUNK_SIZE);
 
             let links: Vec<Ipld> = chunks
                 .map(|chunk| {
-                    let leaf = ipld!({
-                        "Data": Ipld::Bytes(chunk.to_vec()),
-                    });
+                    let leaf = Ipld::Bytes(chunk.to_vec());
+                    // encoding as raw
                     let cid = lsys
-                        .store(Prefix::new(0x71, 0x13), &leaf)
+                        .store(Prefix::new(0x55, 0x13), &leaf)
                         .expect("link system should store leaf node");
                     let link = ipld!({
                         "Hash": cid,
@@ -768,15 +939,15 @@ mod tests {
                 .store(Prefix::new(0x71, 0x13), &root_node)
                 .expect("link system to store root node");
 
-            let swarm = Swarm::new(transport, Behaviour::new(lsys), peer_id);
+            let swarm = Swarm::new(transport, Behaviour::new(store), peer_id);
             (swarm, peer_id, root)
         };
         let (mut swarm2, peer2) = {
             let (pubkey, transport) = transport();
             let peer_id = pubkey.to_peer_id();
             let store = MemoryBlockstore::new();
-            let lsys = LinkSystem::new(store);
-            let swarm = Swarm::new(transport, Behaviour::new(lsys), peer_id);
+            let lsys = LinkSystem::new(store.clone());
+            let swarm = Swarm::new(transport, Behaviour::new(store), peer_id);
             (swarm, peer_id)
         };
 
@@ -812,32 +983,22 @@ mod tests {
         client.request(peer1, req.clone());
 
         async_std::task::block_on(async move {
+            let mut bytes_fut = Box::pin(resolve_raw_bytes(*req.id(), swarm2.by_ref()));
             loop {
                 let swarm1_fut = swarm1.select_next_some();
-                let swarm2_fut = swarm2.select_next_some();
 
                 pin_mut!(swarm1_fut);
-                pin_mut!(swarm2_fut);
 
-                match future::select(swarm1_fut, swarm2_fut)
-                    .await
-                    .factor_second()
-                    .0
-                {
-                    future::Either::Left(SwarmEvent::Behaviour(GraphSyncEvent::Accepted {
-                        request,
-                        ..
-                    })) => {
+                match future::select(swarm1_fut, &mut bytes_fut).await {
+                    future::Either::Left((
+                        SwarmEvent::Behaviour(GraphSyncEvent::Accepted { request, .. }),
+                        _,
+                    )) => {
                         assert_eq!(request.id(), req.id());
                         println!("request accepted");
                     }
-                    future::Either::Right(SwarmEvent::ConnectionEstablished { .. }) => {
-                        //
-                        println!("connection established");
-                    }
-                    future::Either::Right(SwarmEvent::Behaviour(GraphSyncEvent::Received {
-                        ..
-                    })) => {
+                    future::Either::Right((data, _)) => {
+                        assert_eq!(data, bytes);
                         return;
                     }
                     _ => continue,
