@@ -20,14 +20,6 @@ where
     pub fn new(bstore: BS) -> Self {
         Self { bstore }
     }
-    pub fn load(&self, cid: Cid) -> Result<Ipld> {
-        let codec = IpldCodec::try_from(cid.codec())?;
-        if let Some(blk) = self.bstore.get(&cid)? {
-            let mut reader = Cursor::new(blk);
-            return Ipld::decode(codec, &mut reader);
-        }
-        Err(anyhow!("not found"))
-    }
     pub fn store(&self, p: Prefix, n: &Ipld) -> Result<Cid> {
         let codec = IpldCodec::try_from(p.codec)?;
         let mut buf = Vec::new();
@@ -66,6 +58,24 @@ where
             let codec = IpldCodec::try_from(cid.codec())?;
             let node = codec.decode(&blk)?;
             return Ok((node, blk));
+        }
+        Err(anyhow!("not found"))
+    }
+}
+
+pub trait IpldLoader {
+    fn load(&self, cid: Cid) -> Result<Ipld>;
+}
+
+impl<BS> IpldLoader for LinkSystem<BS>
+where
+    BS: Blockstore,
+{
+    fn load(&self, cid: Cid) -> Result<Ipld> {
+        let codec = IpldCodec::try_from(cid.codec())?;
+        if let Some(blk) = self.bstore.get(&cid)? {
+            let mut reader = Cursor::new(blk);
+            return Ipld::decode(codec, &mut reader);
         }
         Err(anyhow!("not found"))
     }
