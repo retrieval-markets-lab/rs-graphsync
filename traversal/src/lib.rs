@@ -15,7 +15,7 @@ use unixfs::resolve_unixfs;
 pub use link_system::{BlockLoader, IpldLoader, LinkSystem, Prefix};
 pub use selector::Selector;
 
-#[derive(Error, Debug, PartialEq)]
+#[derive(Error, Debug, PartialEq, Eq)]
 pub enum IterError {
     #[error("block not found for {0}")]
     NotFound(Cid),

@@ -43,7 +43,7 @@ pub enum Selector {
     Matcher,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Copy)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Copy)]
 pub enum RecursionLimit {
     #[serde(rename = "none", with = "empty_map")]
     None,

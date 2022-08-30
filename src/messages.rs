@@ -207,9 +207,9 @@ impl Builder {
                         resp = resp.extension(ext.name, ext.data);
                     }
                 }
-                responses = responses.and_then(|mut resps| {
+                responses = responses.map(|mut resps| {
                     resps.push(resp.build().unwrap());
-                    Some(resps)
+                    resps
                 });
             }
         }

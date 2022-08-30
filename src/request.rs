@@ -11,7 +11,7 @@ pub type Priority = i32;
 
 pub type Extensions = BTreeMap<String, Ipld>;
 
-#[derive(PartialEq, Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(PartialEq, Eq, Clone, Copy, Debug, Serialize, Deserialize)]
 pub enum RequestType {
     #[serde(rename = "n")]
     New,
@@ -115,6 +115,12 @@ impl Request {
     #[inline]
     pub fn extensions(&self) -> Option<&Extensions> {
         self.extensions.as_ref()
+    }
+}
+
+impl Default for Request {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
