@@ -1,17 +1,17 @@
 use ipld_traversal::{blockstore::Blockstore, IpldLoader};
 use libipld::{codec::Codec, codec_impl::IpldCodec, Cid, Ipld};
-use std::cell::RefCell;
 use std::collections::VecDeque;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
 pub struct ReconciledLoader<BS> {
     bstore: BS,
-    state: Rc<RefCell<LoaderState>>,
+    state: Arc<Mutex<LoaderState>>,
 }
 
 struct LoaderState {
     queue: VecDeque<(Cid, Vec<u8>)>,
+    received: usize,
     online: bool,
 }
 
@@ -20,6 +20,7 @@ impl LoaderState {
         LoaderState {
             queue: VecDeque::new(),
             online: false,
+            received: 0,
         }
     }
 }
@@ -42,11 +43,15 @@ where
     }
 
     pub fn injest(&self, k: Cid, block: Vec<u8>) {
-        self.state.borrow_mut().queue.push_back((k, block));
+        self.state.lock().unwrap().queue.push_back((k, block));
     }
 
     pub fn set_online(&mut self, online: bool) {
-        self.state.borrow_mut().online = online;
+        self.state.lock().unwrap().online = online;
+    }
+
+    pub fn received(&self) -> usize {
+        self.state.lock().unwrap().received
     }
 }
 
@@ -56,13 +61,14 @@ where
 {
     fn load(&self, cid: Cid) -> anyhow::Result<Ipld> {
         let codec = IpldCodec::try_from(cid.codec())?;
-        let mut state = self.state.borrow_mut();
+        let mut state = self.state.lock().unwrap();
         if state.online {
             if let Some((key, blk)) = state.queue.pop_front() {
                 if key != cid {
                     return Err(anyhow::format_err!("invalid block"));
                 }
                 self.bstore.put_keyed(&key, &blk[..])?;
+                state.received += blk.len();
                 let node = codec.decode(&blk)?;
                 return Ok(node);
             }

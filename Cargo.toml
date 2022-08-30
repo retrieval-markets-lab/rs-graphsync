@@ -25,8 +25,12 @@ smallvec = "1.9.0"
 [dev-dependencies]
 hex = "0.4.3"
 rand = "0.8.5"
+clap = { version = "3.2.18", features = ["derive"] }
 
 [workspace]
 members = [
   "traversal"
 ]
+
+[[example]]
+name = "cmd_api"
