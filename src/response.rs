@@ -9,7 +9,7 @@ use serde_tuple::*;
 ///
 /// A GraphSync block consists of an encoded prefix and byte data.
 ///
-#[derive(Debug, Clone, PartialEq, Serialize_tuple, Deserialize_tuple)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize_tuple, Deserialize_tuple)]
 pub struct Block {
     #[serde(with = "serde_bytes")]
     pub prefix: Vec<u8>,
@@ -17,7 +17,7 @@ pub struct Block {
     pub data: Vec<u8>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize_tuple, Deserialize_tuple)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize_tuple, Deserialize_tuple)]
 pub struct LinkData {
     pub link: Cid,
     pub action: LinkAction,
@@ -38,7 +38,7 @@ impl LinkData {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LinkAction {
     #[serde(rename = "p")]
     Present,

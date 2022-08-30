@@ -176,9 +176,9 @@ where
 
     fn inject_dial_failure(
         &mut self,
-        peer_id: Option<PeerId>,
+        _peer_id: Option<PeerId>,
         _: Self::ConnectionHandler,
-        error: &DialError,
+        _error: &DialError,
     ) {
     }
 
@@ -190,7 +190,7 @@ where
     fn inject_event(
         &mut self,
         peer_id: PeerId,
-        connection: ConnectionId,
+        _connection: ConnectionId,
         event: <<Self::ConnectionHandler as IntoConnectionHandler>::Handler as ConnectionHandler>::OutEvent,
     ) {
         match event {
@@ -244,9 +244,9 @@ where
                 }
             }
             HandlerEvent::Partial(id, (cid, block)) => {
-                self.loaders
-                    .get(&id)
-                    .and_then(|loader| Some(loader.injest(cid, block)));
+                if let Some(loader) = self.loaders.get(&id) {
+                    loader.injest(cid, block);
+                }
             }
             _ => (),
         }
@@ -255,7 +255,7 @@ where
     fn poll(
         &mut self,
         cx: &mut Context<'_>,
-        params: &mut impl PollParameters,
+        _params: &mut impl PollParameters,
     ) -> Poll<NetworkBehaviourAction<Self::OutEvent, Self::ConnectionHandler>> {
         if let Some(event) = self.events.pop_front() {
             return Poll::Ready(event);
@@ -314,7 +314,7 @@ where
                                 .loaders
                                 .remove(&id)
                                 .map(|l| l.received())
-                                .get_or_insert_with(|| 0);
+                                .get_or_insert(0);
                             let event = GraphSyncEvent::Completed { id, received };
                             return Poll::Ready(NetworkBehaviourAction::GenerateEvent(event));
                         }
@@ -356,7 +356,7 @@ where
                                 .loaders
                                 .remove(&id)
                                 .map(|l| l.received())
-                                .get_or_insert_with(|| 0);
+                                .get_or_insert(0);
                             let event = GraphSyncEvent::Completed { id, received };
                             return Poll::Ready(NetworkBehaviourAction::GenerateEvent(event));
                         }
@@ -523,7 +523,7 @@ impl ConnectionHandler for GraphSyncHandler {
     fn inject_dial_upgrade_error(
         &mut self,
         _info: Self::OutboundOpenInfo,
-        err: ConnectionHandlerUpgrErr<
+        _err: ConnectionHandlerUpgrErr<
             <Self::OutboundProtocol as OutboundUpgrade<NegotiatedSubstream>>::Error,
         >,
     ) {
@@ -549,8 +549,7 @@ impl ConnectionHandler for GraphSyncHandler {
             return Poll::Ready(self.events.remove(0));
         }
 
-        while let Some(Poll::Ready(Some(event))) =
-            self.inbound.as_mut().map(|f| f.poll_next_unpin(cx))
+        if let Some(Poll::Ready(Some(event))) = self.inbound.as_mut().map(|f| f.poll_next_unpin(cx))
         {
             self.keep_alive = KeepAlive::Yes;
             return Poll::Ready(ConnectionHandlerEvent::Custom(event));
@@ -742,7 +741,7 @@ mod tests {
     use super::*;
     use crate::request::Request;
     use crate::resolver::resolve_raw_bytes;
-    use futures::{channel::oneshot, pin_mut, prelude::*};
+    use futures::{channel::oneshot, pin_mut};
     use ipld_traversal::{blockstore::MemoryBlockstore, link_system::LinkSystem};
     use libp2p::core::{
         identity,
@@ -854,7 +853,7 @@ mod tests {
         let mut bytes = vec![0u8; 3 * CHUNK_SIZE];
         thread_rng().fill(&mut bytes[..]);
 
-        let mut chunks = bytes.chunks(CHUNK_SIZE);
+        let chunks = bytes.chunks(CHUNK_SIZE);
 
         let links: Vec<Ipld> = chunks
             .map(|chunk| {
@@ -924,7 +923,7 @@ mod tests {
             let store = MemoryBlockstore::new();
             let lsys = LinkSystem::new(store.clone());
 
-            let mut chunks = bytes.chunks(CHUNK_SIZE);
+            let chunks = bytes.chunks(CHUNK_SIZE);
 
             let links: Vec<Ipld> = chunks
                 .map(|chunk| {
@@ -952,13 +951,11 @@ mod tests {
             let swarm = Swarm::new(transport, Behaviour::new(store), peer_id);
             (swarm, peer_id, root)
         };
-        let (mut swarm2, peer2) = {
+        let mut swarm2 = {
             let (pubkey, transport) = transport();
             let peer_id = pubkey.to_peer_id();
             let store = MemoryBlockstore::new();
-            let lsys = LinkSystem::new(store.clone());
-            let swarm = Swarm::new(transport, Behaviour::new(store), peer_id);
-            (swarm, peer_id)
+            Swarm::new(transport, Behaviour::new(store), peer_id)
         };
 
         Swarm::listen_on(&mut swarm1, "/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();

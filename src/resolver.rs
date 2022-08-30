@@ -1,4 +1,4 @@
-use crate::network::{Behaviour, GraphSyncEvent, GraphSyncHandler};
+use crate::network::GraphSyncEvent;
 use crate::request::RequestId;
 use futures::prelude::*;
 use libipld::Ipld;
