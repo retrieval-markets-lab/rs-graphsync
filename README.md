@@ -11,6 +11,22 @@ GraphSync is an IPFS data transfer protocol used across the IPFS and Web3 ecosys
 IPLD data. It is used by Filecoin for syncing the blockchain and transfering DAGified content
 in a trustless fashion.
 
-## WIP
+## Usage
 
-This library is currently in development. First release will be out soon...
+To add this crate to your repo, either add `graphsync` to your `Cargo.toml` or run `cargo add graphsync`.
+You might also need selectors from `ipld_traversal` crate.
+
+```rust
+/// TODO
+```
+
+## Benchmarks
+
+To benchmark IPLD traversals for different tree sizes run
+```sh
+cargo bench traversal
+```
+To benchmark end to end transfers run
+```sh
+cargo bench graphsync
+```

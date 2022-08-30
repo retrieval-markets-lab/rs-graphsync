@@ -2,6 +2,7 @@
 name = "graphsync"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -26,6 +27,7 @@ smallvec = "1.9.0"
 hex = "0.4.3"
 rand = "0.8.5"
 clap = { version = "3.2.18", features = ["derive"] }
+criterion = { version = "0.3", features = ["async_futures", "async_std"] }
 
 [workspace]
 members = [
@@ -34,3 +36,11 @@ members = [
 
 [[example]]
 name = "cmd_api"
+
+[[bench]]
+name = "e2e"
+harness = false
+
+[[bench]]
+name = "traversal"
+harness = false
