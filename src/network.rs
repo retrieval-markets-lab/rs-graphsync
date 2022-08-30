@@ -30,7 +30,7 @@ use std::{
 #[derive(Debug)]
 pub enum GraphSyncEvent {
     Accepted { peer_id: PeerId, request: Request },
-    Completed { id: RequestId },
+    Completed { id: RequestId, received: usize },
     Block { id: RequestId, data: Ipld },
     Sent { peer_id: PeerId },
     Error { peer_id: PeerId },
@@ -310,7 +310,12 @@ where
                             }
                         }
                         None => {
-                            let event = GraphSyncEvent::Completed { id };
+                            let received = *self
+                                .loaders
+                                .remove(&id)
+                                .map(|l| l.received())
+                                .get_or_insert_with(|| 0);
+                            let event = GraphSyncEvent::Completed { id, received };
                             return Poll::Ready(NetworkBehaviourAction::GenerateEvent(event));
                         }
                     }
@@ -347,7 +352,12 @@ where
                             }
                         }
                         None => {
-                            let event = GraphSyncEvent::Completed { id };
+                            let received = *self
+                                .loaders
+                                .remove(&id)
+                                .map(|l| l.received())
+                                .get_or_insert_with(|| 0);
+                            let event = GraphSyncEvent::Completed { id, received };
                             return Poll::Ready(NetworkBehaviourAction::GenerateEvent(event));
                         }
                     }

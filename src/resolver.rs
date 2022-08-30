@@ -10,7 +10,7 @@ pub async fn resolve_raw_bytes(
     from: impl Stream<Item = SwarmEvent<GraphSyncEvent, io::Error>>,
 ) -> Vec<u8> {
     from.take_while(|event| {
-        if let SwarmEvent::Behaviour(GraphSyncEvent::Completed { id }) = event {
+        if let SwarmEvent::Behaviour(GraphSyncEvent::Completed { id, .. }) = event {
             if *id == req_id {
                 return future::ready(false);
             }
