@@ -225,6 +225,12 @@ impl Builder {
     }
 }
 
+#[derive(Debug, Default)]
+pub struct DagInfo {
+    pub size: usize,
+    pub blocks: usize,
+}
+
 pub struct MsgWriter<W> {
     inner: W,
     builder: Builder,
@@ -257,7 +263,8 @@ where
         mut self,
         req_id: RequestId,
         mut blocks: impl Iterator<Item = Result<(Cid, Vec<u8>), IterError>>,
-    ) -> io::Result<()> {
+    ) -> io::Result<DagInfo> {
+        let mut info = DagInfo::default();
         let mut incomplete = false;
         loop {
             match blocks.next() {
@@ -265,6 +272,8 @@ where
                     if data.len() > self.spare_capacity() && !self.builder.is_empty() {
                         self.send_msg().await?;
                     }
+                    info.blocks += 1;
+                    info.size += data.len();
                     self.builder.insert_block((cid, data));
                     self.builder.insert_link(req_id, LinkData::present(cid));
                 }
@@ -289,7 +298,7 @@ where
         self.builder.complete(req_id, status);
         self.send_msg().await?;
         self.inner.close().await?;
-        Ok(())
+        Ok(info)
     }
 
     pub async fn send_request(mut self, request: Request) -> io::Result<()> {

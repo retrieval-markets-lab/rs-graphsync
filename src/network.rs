@@ -1,5 +1,5 @@
 use crate::loader::ReconciledLoader;
-use crate::messages::{Message, MsgWriter};
+use crate::messages::{DagInfo, Message, MsgWriter};
 use crate::request::{Request, RequestId};
 use crate::response::StatusCode;
 use futures::{future::BoxFuture, prelude::*, stream::unfold, stream::BoxStream};
@@ -29,11 +29,31 @@ use std::{
 
 #[derive(Debug)]
 pub enum GraphSyncEvent {
-    Accepted { peer_id: PeerId, request: Request },
-    Completed { id: RequestId, received: usize },
-    Block { id: RequestId, data: Ipld },
-    Sent { peer_id: PeerId },
-    Error { peer_id: PeerId },
+    Accepted {
+        peer_id: PeerId,
+        request: Request,
+    },
+    Completed {
+        id: RequestId,
+        peer_id: PeerId,
+        received: usize,
+    },
+    Block {
+        id: RequestId,
+        data: Ipld,
+    },
+    SentRequest {
+        id: RequestId,
+        peer_id: PeerId,
+    },
+    SentAllBlocks {
+        id: RequestId,
+        peer_id: PeerId,
+        sent: usize,
+    },
+    Error {
+        peer_id: PeerId,
+    },
 }
 
 enum Tx {
@@ -48,8 +68,13 @@ enum Tx {
         root: Cid,
         selector: Selector,
     },
-    Sending {
+    SendingRequest {
+        req_id: RequestId,
         fut: BoxFuture<'static, io::Result<()>>,
+    },
+    SendingBlocks {
+        req_id: RequestId,
+        fut: BoxFuture<'static, io::Result<DagInfo>>,
     },
 }
 
@@ -217,15 +242,12 @@ where
                 }
             }
             HandlerEvent::NewResponse(writer) => {
-                // let observed = self
-                //     .connected
-                //     .get(&peer_id)
-                //     .and_then(|addrs| addrs.get(&connection))
-                //     .expect("to be a connection when inject_event is called");
                 match self.requests.remove(&peer_id).expect("to be a writer") {
                     Tx::PendingSubstream { request } => {
+                        let req_id = *request.id();
                         let fut = writer.send_request(request).boxed();
-                        self.requests.insert(peer_id, Tx::Sending { fut });
+                        self.requests
+                            .insert(peer_id, Tx::SendingRequest { req_id, fut });
                     }
                     Tx::PendingResponseSubstream {
                         req_id,
@@ -238,7 +260,8 @@ where
                             selector,
                         );
                         let fut = writer.write(req_id, it).boxed();
-                        self.requests.insert(peer_id, Tx::Sending { fut });
+                        self.requests
+                            .insert(peer_id, Tx::SendingBlocks { fut, req_id });
                     }
                     _ => (),
                 }
@@ -315,7 +338,11 @@ where
                                 .remove(&id)
                                 .map(|l| l.received())
                                 .get_or_insert(0);
-                            let event = GraphSyncEvent::Completed { id, received };
+                            let event = GraphSyncEvent::Completed {
+                                id,
+                                received,
+                                peer_id: peer,
+                            };
                             return Poll::Ready(NetworkBehaviourAction::GenerateEvent(event));
                         }
                     }
@@ -357,7 +384,11 @@ where
                                 .remove(&id)
                                 .map(|l| l.received())
                                 .get_or_insert(0);
-                            let event = GraphSyncEvent::Completed { id, received };
+                            let event = GraphSyncEvent::Completed {
+                                id,
+                                received,
+                                peer_id: peer,
+                            };
                             return Poll::Ready(NetworkBehaviourAction::GenerateEvent(event));
                         }
                     }
@@ -395,14 +426,42 @@ where
                     });
                 }
                 // A substream has been open and we are waiting for the transfer to complete.
-                Tx::Sending { mut fut } => match Future::poll(Pin::new(&mut fut), cx) {
-                    Poll::Ready(Ok(())) => {
+                Tx::SendingRequest { mut fut, req_id } => {
+                    match Future::poll(Pin::new(&mut fut), cx) {
+                        Poll::Ready(Ok(())) => {
+                            return Poll::Ready(NetworkBehaviourAction::GenerateEvent(
+                                GraphSyncEvent::SentRequest {
+                                    id: req_id,
+                                    peer_id,
+                                },
+                            ));
+                        }
+                        Poll::Pending => {
+                            self.requests
+                                .insert(peer_id, Tx::SendingRequest { req_id, fut });
+                        }
+                        Poll::Ready(Err(_err)) => {
+                            return Poll::Ready(NetworkBehaviourAction::GenerateEvent(
+                                GraphSyncEvent::Error { peer_id },
+                            ));
+                        }
+                    }
+                }
+                // A substream has been open and we are waiting for the transfer to complete.
+                Tx::SendingBlocks { mut fut, req_id } => match Future::poll(Pin::new(&mut fut), cx)
+                {
+                    Poll::Ready(Ok(info)) => {
                         return Poll::Ready(NetworkBehaviourAction::GenerateEvent(
-                            GraphSyncEvent::Sent { peer_id },
+                            GraphSyncEvent::SentAllBlocks {
+                                id: req_id,
+                                peer_id,
+                                sent: info.size,
+                            },
                         ));
                     }
                     Poll::Pending => {
-                        self.requests.insert(peer_id, Tx::Sending { fut });
+                        self.requests
+                            .insert(peer_id, Tx::SendingBlocks { req_id, fut });
                     }
                     Poll::Ready(Err(_err)) => {
                         return Poll::Ready(NetworkBehaviourAction::GenerateEvent(
