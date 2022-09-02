@@ -46,6 +46,8 @@ pub enum RequestType {
 /// reifier.
 ///
 /// ```
+/// use graphsync::Request;
+///
 /// let request: Request =
 /// "bafybeihq3wo4u27amukm36i7vbpirym4y2lvy53uappzhl3oehcm4ukphu/dir/file.ext".parse().unwrap();
 /// ```
