@@ -116,6 +116,11 @@ impl Request {
     pub fn extensions(&self) -> Option<&Extensions> {
         self.extensions.as_ref()
     }
+
+    #[inline]
+    pub fn get_extension(&self, key: String) -> Option<&Ipld> {
+        self.extensions.as_ref().and_then(|exts| exts.get(&key))
+    }
 }
 
 impl Default for Request {
