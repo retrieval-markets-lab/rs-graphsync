@@ -1,8 +1,8 @@
 use anyhow::Result;
-use ipld_traversal::Selector;
+use ipld_traversal::{unixfs::unixfs_path_selector, Selector};
 use libipld::{Cid, Ipld};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, str::FromStr};
 use uuid::Uuid;
 
 pub type RequestId = Uuid;
@@ -28,7 +28,7 @@ pub enum RequestType {
 ///
 /// # Examples
 ///
-/// Creating a GraphSync `Request`
+/// Creating a GraphSync `Request` with the builder pattern.
 ///
 /// ```
 /// use graphsync::Request;
@@ -41,6 +41,15 @@ pub enum RequestType {
 ///     .build()
 ///     .unwrap();
 /// ```
+///
+/// Creating a GraphSync `Request` from an IPFS unixfs path, the selector will use a unixfs
+/// reifier.
+///
+/// ```
+/// let request: Request =
+/// "bafybeihq3wo4u27amukm36i7vbpirym4y2lvy53uappzhl3oehcm4ukphu/dir/file.ext".parse().unwrap();
+/// ```
+///
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Request {
     id: RequestId,
@@ -64,16 +73,6 @@ pub struct Request {
     #[serde(rename = "ext", skip_serializing_if = "Option::is_none")]
     extensions: Option<Extensions>,
 }
-
-// impl From<Vec<Request>> for GraphSyncMessage {
-//     fn from(reqs: Vec<Request>) -> Self {
-//         Self::V2 {
-//             requests: Some(reqs.into_iter().map(|req| req.into()).collect()),
-//             responses: None,
-//             blocks: None,
-//         }
-//     }
-// }
 
 impl Request {
     pub fn new() -> Request {
@@ -205,6 +204,18 @@ impl Builder {
     {
         Builder {
             inner: self.inner.and_then(func),
+        }
+    }
+}
+
+impl FromStr for Request {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        if let Some((root, selector)) = unixfs_path_selector(s.into()) {
+            Request::builder().root(root).selector(selector).build()
+        } else {
+            Err(anyhow::format_err!("invalid unixfs path"))
         }
     }
 }

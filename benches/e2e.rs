@@ -3,7 +3,7 @@ use criterion::BenchmarkId;
 use criterion::Criterion;
 use criterion::{criterion_group, criterion_main, BatchSize, Throughput};
 use futures::{pin_mut, prelude::*};
-use graphsync::{Behaviour, GraphSyncEvent, Request};
+use graphsync::{GraphSync, GraphSyncEvent, Request};
 use ipld_traversal::{
     blockstore::MemoryBlockstore,
     selector::{RecursionLimit, Selector},
@@ -85,7 +85,7 @@ fn bench_transfer(c: &mut Criterion) {
                 || prepare_blocks(size),
                 |(store, root)| async move {
                     let (peer1, trans) = mk_transport();
-                    let mut swarm1 = Swarm::new(trans, Behaviour::new(store), peer1);
+                    let mut swarm1 = Swarm::new(trans, GraphSync::new(store), peer1);
 
                     Swarm::listen_on(&mut swarm1, "/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();
 
@@ -103,7 +103,7 @@ fn bench_transfer(c: &mut Criterion) {
 
                     let (peer2, trans) = mk_transport();
                     let mut swarm2 =
-                        Swarm::new(trans, Behaviour::new(MemoryBlockstore::new()), peer2);
+                        Swarm::new(trans, GraphSync::new(MemoryBlockstore::new()), peer2);
 
                     let client = swarm2.behaviour_mut();
                     client.add_address(&peer1, listener_addr);

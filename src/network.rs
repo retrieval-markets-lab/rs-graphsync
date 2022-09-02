@@ -92,7 +92,7 @@ enum Traversal<L> {
     },
 }
 
-pub struct Behaviour<BS> {
+pub struct GraphSync<BS> {
     // Keep track of open connections, this is helpful to know if
     // a peer should be dialed or not.
     connected: HashMap<PeerId, HashMap<ConnectionId, Multiaddr>>,
@@ -110,12 +110,12 @@ pub struct Behaviour<BS> {
     blocks: BS,
 }
 
-impl<BS> Behaviour<BS>
+impl<BS> GraphSync<BS>
 where
     BS: Blockstore + Send + Clone + 'static,
 {
     pub fn new(blocks: BS) -> Self {
-        Behaviour {
+        GraphSync {
             connected: HashMap::new(),
             addresses: HashMap::new(),
             events: VecDeque::new(),
@@ -154,7 +154,7 @@ where
     }
 }
 
-impl<BS> NetworkBehaviour for Behaviour<BS>
+impl<BS> NetworkBehaviour for GraphSync<BS>
 where
     BS: Blockstore + Send + Clone + 'static,
 {
@@ -936,7 +936,7 @@ mod tests {
             .store(Prefix::new(0x71, 0x13), &root_node)
             .expect("link system to store root node");
 
-        let mut swarm = Swarm::new(tp, Behaviour::new(store), peer_id);
+        let mut swarm = Swarm::new(tp, GraphSync::new(store), peer_id);
 
         let client = swarm.behaviour_mut();
 
@@ -1007,14 +1007,14 @@ mod tests {
                 .store(Prefix::new(0x71, 0x13), &root_node)
                 .expect("link system to store root node");
 
-            let swarm = Swarm::new(transport, Behaviour::new(store), peer_id);
+            let swarm = Swarm::new(transport, GraphSync::new(store), peer_id);
             (swarm, peer_id, root)
         };
         let mut swarm2 = {
             let (pubkey, transport) = transport();
             let peer_id = pubkey.to_peer_id();
             let store = MemoryBlockstore::new();
-            Swarm::new(transport, Behaviour::new(store), peer_id)
+            Swarm::new(transport, GraphSync::new(store), peer_id)
         };
 
         Swarm::listen_on(&mut swarm1, "/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();
