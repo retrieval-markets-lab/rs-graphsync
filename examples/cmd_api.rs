@@ -46,7 +46,7 @@ use futures::{
     channel::{mpsc, oneshot},
     prelude::*,
 };
-use graphsync::{GraphSyncEvent, RequestId};
+use graphsync::{GraphSync, GraphSyncEvent, RequestId};
 use ipld_traversal::{
     blockstore::{Blockstore, MemoryBlockstore},
     selector::RecursionLimit,
@@ -706,7 +706,7 @@ fn calc_rate(size: usize, duration: Duration) -> f64 {
 struct DataTransferBehaviour<BS> {
     identify: Identify,
     request_response: DataTransfer,
-    graphsync: graphsync::Behaviour<BS>,
+    graphsync: GraphSync<BS>,
 }
 
 impl<BS> DataTransferBehaviour<BS>
@@ -717,11 +717,11 @@ where
         DataTransferBehaviour {
             identify: Identify::new(IdentifyConfig::new("/ipfs/id/1.0.0".into(), pubkey)),
             request_response: Default::default(),
-            graphsync: graphsync::Behaviour::new(store),
+            graphsync: GraphSync::new(store),
         }
     }
 
-    fn graphsync_mut(&mut self) -> &mut graphsync::Behaviour<BS> {
+    fn graphsync_mut(&mut self) -> &mut GraphSync<BS> {
         &mut self.graphsync
     }
 
