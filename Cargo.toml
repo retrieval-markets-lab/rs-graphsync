@@ -3,13 +3,15 @@ name = "graphsync"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
+description = "Implementation of the GraphSync wire protocol"
+repository = "https://github.com/myelnet/rs-graphsync"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 anyhow = "1.0.51"
 uuid = { version = "1.1.2", features = ["serde", "v4"] }
-ipld_traversal = { path = "./traversal", default_features = false }
+ipld_traversal = { path = "./traversal", version = "0.1.0", default_features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_tuple = "0.5"
 serde_repr = "0.1"
