@@ -81,6 +81,43 @@ where
     }
 }
 
+/// Represents a CID Prefix.
+///
+/// A CID Prefix consists of a version (defaults to 1), a codec id,
+/// an optional multihash length and id.
+///
+/// # Examples
+///
+/// Creating a prefix straight from known ids.
+///
+/// ```
+/// use ipld_traversal::Prefix;
+///
+/// // Raw bytes codec and SHA256 multihash.
+/// let prefix = Prefix::new(0x55, 0x12);
+/// ```
+///
+/// Creating a prefix with the builder pattern.
+///
+/// ```
+/// use ipld_traversal::Prefix;
+///
+/// let prefix = Prefix::builder()
+///     .raw()
+///     .sha256()
+///     .build();
+/// ```
+///
+/// Or creating a prefix with libipld enums.
+/// ```
+/// use libipld::cbor::DagCborCodec;
+/// use libipld::multihash::Code;
+/// use ipld_traversal::Prefix;
+///
+/// let prefix = Prefix::new(DagCborCodec.into(), Code::Sha2_256.into());
+///
+/// ```
+///
 #[derive(PartialEq, Eq, Clone, Debug, Copy)]
 pub struct Prefix {
     pub version: Version,
@@ -99,6 +136,12 @@ impl Prefix {
             mh_len: 0,
         }
     }
+
+    #[inline]
+    pub fn builder() -> Builder {
+        Builder::new()
+    }
+
     pub fn new_from_bytes(data: &[u8]) -> Result<Prefix> {
         let mut cur = Cursor::new(data);
 
@@ -143,6 +186,71 @@ impl From<Cid> for Prefix {
             mh_type: cid.hash().code(),
             mh_len: cid.hash().size().into(),
         }
+    }
+}
+
+/// A Prefix builder
+///
+/// This type provides some commonly used codecs and multihashes
+/// to quickly build a prefix.
+#[derive(Debug)]
+pub struct Builder {
+    inner: Prefix,
+}
+
+impl Default for Builder {
+    #[inline]
+    fn default() -> Builder {
+        Builder {
+            inner: Prefix::new(0, 0),
+        }
+    }
+}
+
+impl Builder {
+    #[inline]
+    pub fn new() -> Builder {
+        Builder::default()
+    }
+
+    #[inline]
+    pub fn dag_cbor(mut self) -> Builder {
+        self.inner.codec = 0x71;
+        self
+    }
+
+    #[inline]
+    pub fn dag_pb(mut self) -> Builder {
+        self.inner.codec = 0x70;
+        self
+    }
+
+    #[inline]
+    pub fn dag_json(mut self) -> Builder {
+        self.inner.codec = 0x0129;
+        self
+    }
+
+    #[inline]
+    pub fn raw(mut self) -> Builder {
+        self.inner.codec = 0x55;
+        self
+    }
+
+    #[inline]
+    pub fn sha256(mut self) -> Builder {
+        self.inner.mh_type = 0x12;
+        self
+    }
+
+    #[inline]
+    pub fn sha512(mut self) -> Builder {
+        self.inner.mh_type = 0x13;
+        self
+    }
+
+    pub fn build(self) -> Prefix {
+        self.inner
     }
 }
 

@@ -1,3 +1,88 @@
+/*!
+This crate provides a library for constructing IPLD selectors and running traversals
+for the GraphSync protocol implementation. It tries to mirror go-ipld-prime implementation
+although it does not contain all the features.
+
+# Blockstore
+The trait copies one used by the Filecoin FVM implementation. It does not worry about
+codecs contrary to the Libipld blockstore architecture which can be unfriendly to consumers
+because of the generic parameter types requirements.
+
+Instead, a LinkSystem akin to the ipld-prime implementation can wrap the blockstore to provide
+codec support and a simplement interface for storing Ipld values directly.
+
+```rust
+use ipld_traversal::{LinkSystem, blockstore::MemoryBlockstore, Prefix};
+use libipld::ipld;
+
+let store = MemoryBlockstore::new();
+
+let link_system = LinkSystem::new(store);
+
+let sample_data = ipld!({
+    "Size": 100,
+});
+
+let cid = link_system.store(Prefix::builder().dag_json().sha256().build(), &sample_data).unwrap();
+```
+
+# Selectors
+Most commonly used selector features including reification.
+
+```rust
+use ipld_traversal::selector::{Selector, RecursionLimit};
+use indexmap::indexmap;
+
+let selector = Selector::ExploreRecursive {
+    limit: RecursionLimit::None,
+    sequence: Box::new(Selector::ExploreAll {
+        next: Box::new(Selector::ExploreRecursiveEdge),
+    }),
+    current: None,
+};
+
+let reified = Selector::ExploreInterpretAs {
+    reifier: "unixfs".to_string(),
+    next: Box::new(Selector::ExploreFields {
+        fields: indexmap! {
+            "path".to_string() => Selector::Matcher,
+        },
+    }),
+};
+```
+
+Or not to bother with constructing one from scratch one can simply use:
+```rust
+use ipld_traversal::unixfs::unixfs_path_selector;
+
+let (cid, selector) = unixfs_path_selector("bafybeihq3wo4u27amukm36i7vbpirym4y2lvy53uappzhl3oehcm4ukphu/dir/file.ext".into()).unwrap();
+```
+
+# Traversal
+To run an ipld traversal, an iterator interface is available
+
+```rust
+use ipld_traversal::{Selector, LinkSystem, blockstore::MemoryBlockstore, IpldTraversal, Prefix};
+use libipld::ipld;
+
+let store = MemoryBlockstore::new();
+let lsys = LinkSystem::new(store);
+
+let prefix = Prefix::builder().dag_cbor().sha256().build();
+let leaf = ipld!({ "name": "leaf1", "size": 12 });
+let root = lsys.store(prefix, &leaf).unwrap();
+
+let selector = Selector::ExploreAll {
+    next: Box::new(Selector::ExploreRecursiveEdge),
+};
+
+let mut it = IpldTraversal::new(lsys, root, selector);
+
+let node = it.next().unwrap().unwrap();
+assert_eq!(node, leaf);
+```
+*/
+
 pub mod blockstore;
 mod empty_map;
 pub mod link_system;
