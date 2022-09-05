@@ -60,7 +60,10 @@ cargo bench graphsync
 
 ## Examples
 
-- [Data Transfer](/examples/data-transfer/main.rs)
+- [Data Transfer](/examples/data_transfer/main.rs)
 Demonstrate how to integrate GraphSync in a larger app or into a wrapper
 protocol using the Filecoin data transfer protocol.
 See the main.rs file for info on how to run.
+
+- [WASM](/examples/wasm/src/lib.rs)
+Demonstrate how to integrate GraphSync into a WASM module.
