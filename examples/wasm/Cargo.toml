@@ -8,11 +8,16 @@ crate-type = ["cdylib"]
 
 [dependencies]
 futures = "0.3.24"
-wasm-bindgen = "0.2.82"
+wasm-bindgen = { version = "0.2.82", features = ["serde-serialize"] }
 js-sys = "0.3.59"
 wasm-bindgen-futures = "0.4.32"
 ipld_traversal = { path = "../../traversal", default_features = false }
+graphsync = { path = "../../" }
 libipld = { version = "0.13.1", features = ["serde-codec"] }
+libp2p = { version = "0.46.1", default_features = true }
+libp2p_wasm_ws = { path = "../../libp2p-wasm-ws" }
+serde = { version = "1.0", features = ["derive"] }
+getrandom = { version = "0.2", features = ["js"] }
 
 [dependencies.web-sys]
 version = "0.3.59"

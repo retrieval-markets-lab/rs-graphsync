@@ -2,7 +2,7 @@ mod loader;
 mod messages;
 mod network;
 mod request;
-mod resolver;
+pub mod resolver;
 mod response;
 
 pub use crate::network::{GraphSync, GraphSyncEvent};
