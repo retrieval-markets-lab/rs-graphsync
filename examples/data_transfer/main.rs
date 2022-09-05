@@ -36,7 +36,7 @@
 /// ```
 ///
 ///
-use crate::data_transfer::{
+use crate::behaviour::{
     pull_request, pull_response, BasicVoucher, DataTransfer, TransferEvent, TransferMessage,
     TransferMsgEvent, TransferRequest, TransferResponse,
 };
@@ -73,7 +73,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-mod data_transfer;
+mod behaviour;
 
 #[async_std::main]
 async fn main() -> Result<(), anyhow::Error> {
