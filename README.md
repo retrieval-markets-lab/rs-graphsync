@@ -60,4 +60,7 @@ cargo bench graphsync
 
 ## Examples
 
-See the [example file](/examples/cmd_api.rs) for info on how to run.
+- [Data Transfer](/examples/data-transfer/main.rs)
+Demonstrate how to integrate GraphSync in a larger app or into a wrapper
+protocol using the Filecoin data transfer protocol.
+See the main.rs file for info on how to run.

@@ -1,2 +1,5 @@
+node_modules
 /target
 Cargo.lock
+package-lock.json
+graphsync_wasm_example**
