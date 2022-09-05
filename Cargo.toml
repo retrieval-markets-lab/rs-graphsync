@@ -31,6 +31,7 @@ criterion = { version = "0.3", features = ["async_futures", "async_std"] }
 [workspace]
 members = [
   "traversal",
+  "libp2p-wasm-ws",
   "examples/wasm",
 ]
 
