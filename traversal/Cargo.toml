@@ -19,4 +19,5 @@ anyhow = "1.0.51"
 
 [dev-dependencies]
 hex = "0.4.3"
+rand = "0.8.5"
 

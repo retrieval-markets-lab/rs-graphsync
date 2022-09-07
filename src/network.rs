@@ -4,7 +4,7 @@ use crate::request::{Request, RequestId};
 use crate::response::StatusCode;
 use futures::{future::BoxFuture, prelude::*, stream::unfold, stream::BoxStream};
 use ipld_traversal::{
-    blockstore::Blockstore, link_system::LinkSystem, BlockIterator, IpldTraversal, IterError,
+    blockstore::Blockstore, link_system::LinkSystem, BlockTraversal, IpldTraversal, IterError,
     Prefix, Selector,
 };
 use libipld::{Cid, Ipld};
@@ -53,6 +53,7 @@ pub enum GraphSyncEvent {
     },
     Error {
         peer_id: PeerId,
+        error: anyhow::Error,
     },
 }
 
@@ -254,7 +255,7 @@ where
                         root,
                         selector,
                     } => {
-                        let it = BlockIterator::new(
+                        let it = BlockTraversal::new(
                             LinkSystem::new(self.blocks.clone()),
                             root,
                             selector,
@@ -269,6 +270,11 @@ where
             HandlerEvent::Partial(id, (cid, block)) => {
                 if let Some(loader) = self.loaders.get(&id) {
                     loader.injest(cid, block);
+                }
+            }
+            HandlerEvent::Missing(id, cid) => {
+                if let Some(loader) = self.loaders.get(&id) {
+                    loader.missing(cid);
                 }
             }
             _ => (),
@@ -304,34 +310,31 @@ where
                             });
                             return Poll::Ready(NetworkBehaviourAction::GenerateEvent(event));
                         }
-                        Some(Err(err)) => {
-                            match err {
-                                IterError::NotFound(_cid) => {
-                                    self.loaders
-                                        .entry(*request.id())
-                                        .and_modify(|loader| loader.set_online(true));
-                                    self.requests.insert(peer, Tx::PendingDial { request });
-                                    self.traversals.push_back(Traversal::Remote {
-                                        id,
-                                        peer,
-                                        blocks,
+                        Some(Err(err)) => match err {
+                            IterError::NotFound(_cid) => {
+                                self.loaders
+                                    .entry(id)
+                                    .and_modify(|loader| loader.set_online(true));
+                                self.requests.insert(peer, Tx::PendingDial { request });
+                                self.traversals
+                                    .push_back(Traversal::Remote { id, peer, blocks });
+                                if !self.connected.contains_key(&peer) {
+                                    let handler = self.new_handler();
+                                    return Poll::Ready(NetworkBehaviourAction::Dial {
+                                        opts: DialOpts::peer_id(peer).build(),
+                                        handler,
                                     });
-                                    if !self.connected.contains_key(&peer) {
-                                        let handler = self.new_handler();
-                                        return Poll::Ready(NetworkBehaviourAction::Dial {
-                                            opts: DialOpts::peer_id(peer).build(),
-                                            handler,
-                                        });
-                                    }
-                                }
-                                _ => {
-                                    // TODO: send a failure message
-                                    return Poll::Ready(NetworkBehaviourAction::GenerateEvent(
-                                        GraphSyncEvent::Error { peer_id: peer },
-                                    ));
                                 }
                             }
-                        }
+                            _ => {
+                                return Poll::Ready(NetworkBehaviourAction::GenerateEvent(
+                                    GraphSyncEvent::Error {
+                                        peer_id: peer,
+                                        error: err.into(),
+                                    },
+                                ));
+                            }
+                        },
                         None => {
                             let received = *self
                                 .loaders
@@ -362,8 +365,8 @@ where
                         }
                         Some(Err(err)) => {
                             match err {
-                                IterError::NotFound(_cid) => {
-                                    // Try again
+                                IterError::NotFound(_) | IterError::SkipMe(_) => {
+                                    // These errors should not interupt the iterator.
                                     self.traversals.push_back(Traversal::Remote {
                                         id,
                                         peer,
@@ -371,12 +374,14 @@ where
                                     });
                                 }
                                 _ => {
-                                    // TODO: send a failure message
                                     return Poll::Ready(NetworkBehaviourAction::GenerateEvent(
-                                        GraphSyncEvent::Error { peer_id: peer },
+                                        GraphSyncEvent::Error {
+                                            peer_id: peer,
+                                            error: err.into(),
+                                        },
                                     ));
                                 }
-                            }
+                            };
                         }
                         None => {
                             let received = *self
@@ -440,9 +445,12 @@ where
                             self.requests
                                 .insert(peer_id, Tx::SendingRequest { req_id, fut });
                         }
-                        Poll::Ready(Err(_err)) => {
+                        Poll::Ready(Err(err)) => {
                             return Poll::Ready(NetworkBehaviourAction::GenerateEvent(
-                                GraphSyncEvent::Error { peer_id },
+                                GraphSyncEvent::Error {
+                                    peer_id,
+                                    error: err.into(),
+                                },
                             ));
                         }
                     }
@@ -463,9 +471,12 @@ where
                         self.requests
                             .insert(peer_id, Tx::SendingBlocks { req_id, fut });
                     }
-                    Poll::Ready(Err(_err)) => {
+                    Poll::Ready(Err(err)) => {
                         return Poll::Ready(NetworkBehaviourAction::GenerateEvent(
-                            GraphSyncEvent::Error { peer_id },
+                            GraphSyncEvent::Error {
+                                peer_id,
+                                error: err.into(),
+                            },
                         ));
                     }
                 },
@@ -801,7 +812,12 @@ mod tests {
     use crate::request::Request;
     use crate::resolver::resolve_raw_bytes;
     use futures::{channel::oneshot, pin_mut};
-    use ipld_traversal::{blockstore::MemoryBlockstore, link_system::LinkSystem};
+    use ipld_traversal::{
+        blockstore::MemoryBlockstore,
+        link_system::{LinkSystem, Prefix},
+        selector::RecursionLimit,
+    };
+    use libipld::{ipld, Ipld};
     use libp2p::core::{
         identity,
         muxing::StreamMuxerBox,
@@ -813,6 +829,7 @@ mod tests {
     use libp2p::noise;
     use libp2p::swarm::{Swarm, SwarmEvent};
     use libp2p::tcp::{GenTcpConfig, TcpTransport};
+    use rand::prelude::*;
 
     #[test]
     fn test_protocol() {
@@ -898,10 +915,6 @@ mod tests {
 
     #[test]
     fn offline_request() {
-        use ipld_traversal::{link_system::Prefix, selector::RecursionLimit};
-        use libipld::{ipld, Ipld};
-        use rand::prelude::*;
-
         let (pubkey, tp) = transport();
         let peer_id = pubkey.to_peer_id();
         let store = MemoryBlockstore::new();
@@ -967,10 +980,6 @@ mod tests {
 
     #[test]
     fn behaviour_pull() {
-        use ipld_traversal::{link_system::Prefix, selector::RecursionLimit};
-        use libipld::{ipld, Ipld};
-        use rand::prelude::*;
-
         const CHUNK_SIZE: usize = 250 * 1024;
 
         let mut bytes = vec![0u8; 3 * CHUNK_SIZE];
@@ -1065,6 +1074,119 @@ mod tests {
                     }
                     future::Either::Right((data, _)) => {
                         assert_eq!(data, bytes);
+                        return;
+                    }
+                    _ => continue,
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn partial_request() {
+        const CHUNK_SIZE: usize = 250 * 1024;
+
+        let mut bytes = vec![0u8; 5 * CHUNK_SIZE];
+        thread_rng().fill(&mut bytes[..]);
+
+        let (mut swarm1, peer1, root) = {
+            let (pubkey, transport) = transport();
+            let peer_id = pubkey.to_peer_id();
+            let store = MemoryBlockstore::new();
+            let lsys = LinkSystem::new(store.clone());
+
+            let chunks = bytes.chunks(CHUNK_SIZE);
+
+            let links: Vec<Ipld> = chunks
+                .map(|chunk| {
+                    let leaf = Ipld::Bytes(chunk.to_vec());
+                    // encoding as raw
+                    let cid = lsys
+                        .store(Prefix::new(0x55, 0x13), &leaf)
+                        .expect("link system should store leaf node");
+                    let link = ipld!({
+                        "Hash": cid,
+                        "Tsize": CHUNK_SIZE,
+                    });
+                    link
+                })
+                .collect();
+            // delete the last 2 blocks
+            links.iter().skip(3).for_each(|link| {
+                let _ = link.get("Hash").map(|l| {
+                    if let Ipld::Link(cid) = l {
+                        store.delete_block(cid).unwrap();
+                    }
+                });
+            });
+
+            let root_node = ipld!({
+                "Links": links,
+            });
+
+            let root = lsys
+                .store(Prefix::new(0x71, 0x13), &root_node)
+                .expect("link system to store root node");
+
+            let swarm = Swarm::new(transport, GraphSync::new(store), peer_id);
+            (swarm, peer_id, root)
+        };
+        let mut swarm2 = {
+            let (pubkey, transport) = transport();
+            let peer_id = pubkey.to_peer_id();
+            let store = MemoryBlockstore::new();
+            Swarm::new(transport, GraphSync::new(store), peer_id)
+        };
+
+        Swarm::listen_on(&mut swarm1, "/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();
+
+        let listener_addr = async_std::task::block_on(async {
+            loop {
+                let swarm1_fut = swarm1.select_next_some();
+                pin_mut!(swarm1_fut);
+                match swarm1_fut.await {
+                    SwarmEvent::NewListenAddr { address, .. } => return address,
+                    _ => {}
+                }
+            }
+        });
+
+        let client = swarm2.behaviour_mut();
+        client.add_address(&peer1, listener_addr);
+
+        let selector = Selector::ExploreRecursive {
+            limit: RecursionLimit::None,
+            sequence: Box::new(Selector::ExploreAll {
+                next: Box::new(Selector::ExploreRecursiveEdge),
+            }),
+            current: None,
+        };
+
+        let req = Request::builder()
+            .root(root)
+            .selector(selector)
+            .build()
+            .unwrap();
+        client.request(peer1, req.clone());
+
+        async_std::task::block_on(async move {
+            let mut bytes_fut = Box::pin(resolve_raw_bytes(*req.id(), swarm2.by_ref()));
+            loop {
+                let swarm1_fut = swarm1.select_next_some();
+
+                pin_mut!(swarm1_fut);
+
+                match future::select(swarm1_fut, &mut bytes_fut).await {
+                    future::Either::Left((
+                        SwarmEvent::Behaviour(GraphSyncEvent::Accepted { request, .. }),
+                        _,
+                    )) => {
+                        assert_eq!(request.id(), req.id());
+                        println!("request accepted");
+                    }
+                    future::Either::Right((data, _)) => {
+                        // size should be of only first 3 blocks
+                        assert_eq!(data.len(), 3 * CHUNK_SIZE);
                         return;
                     }
                     _ => continue,

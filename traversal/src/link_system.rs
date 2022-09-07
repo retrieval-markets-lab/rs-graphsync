@@ -7,6 +7,7 @@ use libipld::codec::{Codec, Decode, Encode};
 use libipld::codec_impl::IpldCodec;
 use libipld::{Cid, Ipld};
 use std::io::Cursor;
+use thiserror::Error;
 
 #[derive(Clone)]
 pub struct LinkSystem<BS> {
@@ -72,13 +73,33 @@ where
     BS: Blockstore,
 {
     fn load(&self, cid: Cid) -> Result<Ipld> {
-        let codec = IpldCodec::try_from(cid.codec())?;
-        if let Some(blk) = self.bstore.get(&cid)? {
+        let codec =
+            IpldCodec::try_from(cid.codec()).map_err(|e| LoaderError::Codec(e.to_string()))?;
+        if let Some(blk) = self
+            .bstore
+            .get(&cid)
+            .map_err(|e| LoaderError::Blockstore(e.to_string()))?
+        {
             let mut reader = Cursor::new(blk);
-            return Ipld::decode(codec, &mut reader);
+            return Ipld::decode(codec, &mut reader)
+                .map_err(|e| LoaderError::Decoding(e.to_string()).into());
         }
-        Err(anyhow!("not found"))
+        Err(LoaderError::NotFound(cid).into())
     }
+}
+
+#[derive(Error, Debug, PartialEq, Eq)]
+pub enum LoaderError {
+    #[error("block not found for {0}")]
+    NotFound(Cid),
+    #[error("skip block for {0}")]
+    SkipMe(Cid),
+    #[error("failed to decode: {0}")]
+    Decoding(String),
+    #[error("invalid multicodec: {0}")]
+    Codec(String),
+    #[error("blockstore: {0}")]
+    Blockstore(String),
 }
 
 /// Represents a CID Prefix.
