@@ -121,6 +121,9 @@ pub trait Blockstore {
         }
         Ok(())
     }
+
+    /// Deletes the block for the given Cid key.
+    fn delete_block(&self, k: &Cid) -> Result<()>;
 }
 
 impl<BS> Blockstore for &BS
@@ -137,6 +140,10 @@ where
 
     fn has(&self, k: &Cid) -> Result<bool> {
         (*self).has(k)
+    }
+
+    fn delete_block(&self, k: &Cid) -> Result<()> {
+        (*self).delete_block(k)
     }
 
     fn put<D>(&self, mh_code: multihash::Code, block: &Block<D>) -> Result<Cid>
@@ -180,6 +187,10 @@ where
 
     fn has(&self, k: &Cid) -> Result<bool> {
         (**self).has(k)
+    }
+
+    fn delete_block(&self, k: &Cid) -> Result<()> {
+        (**self).delete_block(k)
     }
 
     fn put<D>(&self, mh_code: multihash::Code, block: &Block<D>) -> Result<Cid>
@@ -231,6 +242,11 @@ impl Blockstore for MemoryBlockstore {
 
     fn put_keyed(&self, k: &Cid, block: &[u8]) -> Result<()> {
         self.blocks.lock().unwrap().insert(*k, block.into());
+        Ok(())
+    }
+
+    fn delete_block(&self, k: &Cid) -> Result<()> {
+        self.blocks.lock().unwrap().remove(k);
         Ok(())
     }
 }

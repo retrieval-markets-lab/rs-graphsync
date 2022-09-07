@@ -1,4 +1,4 @@
-use ipld_traversal::{blockstore::Blockstore, IpldLoader};
+use ipld_traversal::{blockstore::Blockstore, link_system::LoaderError, IpldLoader};
 use libipld::{codec::Codec, codec_impl::IpldCodec, Cid, Ipld};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -9,8 +9,13 @@ pub struct ReconciledLoader<BS> {
     state: Arc<Mutex<LoaderState>>,
 }
 
+enum LinkAction {
+    Present(Vec<u8>),
+    Missing,
+}
+
 struct LoaderState {
-    queue: VecDeque<(Cid, Vec<u8>)>,
+    queue: VecDeque<(Cid, LinkAction)>,
     received: usize,
     online: bool,
 }
@@ -43,7 +48,19 @@ where
     }
 
     pub fn injest(&self, k: Cid, block: Vec<u8>) {
-        self.state.lock().unwrap().queue.push_back((k, block));
+        self.state
+            .lock()
+            .unwrap()
+            .queue
+            .push_back((k, LinkAction::Present(block)));
+    }
+
+    pub fn missing(&self, k: Cid) {
+        self.state
+            .lock()
+            .unwrap()
+            .queue
+            .push_back((k, LinkAction::Missing));
     }
 
     pub fn set_online(&mut self, online: bool) {
@@ -63,14 +80,21 @@ where
         let codec = IpldCodec::try_from(cid.codec())?;
         let mut state = self.state.lock().unwrap();
         if state.online {
-            if let Some((key, blk)) = state.queue.pop_front() {
+            if let Some((key, la)) = state.queue.pop_front() {
                 if key != cid {
                     return Err(anyhow::format_err!("invalid block"));
                 }
-                self.bstore.put_keyed(&key, &blk[..])?;
-                state.received += blk.len();
-                let node = codec.decode(&blk)?;
-                return Ok(node);
+                match la {
+                    LinkAction::Present(blk) => {
+                        self.bstore.put_keyed(&key, &blk[..])?;
+                        state.received += blk.len();
+                        let node = codec.decode(&blk)?;
+                        return Ok(node);
+                    }
+                    LinkAction::Missing => {
+                        return Err(LoaderError::SkipMe(key).into());
+                    }
+                }
             }
         }
         if let Some(blk) = self.bstore.get(&cid)? {

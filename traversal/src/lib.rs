@@ -59,7 +59,10 @@ let (cid, selector) = unixfs_path_selector("bafybeihq3wo4u27amukm36i7vbpirym4y2l
 ```
 
 # Traversal
-To run an ipld traversal, an iterator interface is available
+To run an ipld traversal, an iterator interface is available.
+Note that the iterator will traverse the exact tree as defined by the selector
+but only return the IPLD node the links resolve to. This is different from
+say the ipld-prime walkAdv callback which will return every intermediary ipld nodes.
 
 ```rust
 use ipld_traversal::{Selector, LinkSystem, blockstore::MemoryBlockstore, IpldTraversal, Prefix};
@@ -81,6 +84,30 @@ let mut it = IpldTraversal::new(lsys, root, selector);
 let node = it.next().unwrap().unwrap();
 assert_eq!(node, leaf);
 ```
+
+A block traversal walks the IPLD tree as defined by a given selector while
+returning all the blocks resolved along the way.
+
+```rust
+use ipld_traversal::{Selector, LinkSystem, blockstore::MemoryBlockstore, BlockTraversal, Prefix};
+use libipld::ipld;
+
+let store = MemoryBlockstore::new();
+let lsys = LinkSystem::new(store);
+
+let prefix = Prefix::builder().dag_cbor().sha256().build();
+let leaf = ipld!({ "name": "ipld node", "size": 10 });
+let (root, bytes) = lsys.store_plus_raw(prefix, &leaf).unwrap();
+
+let selector = Selector::ExploreAll {
+    next: Box::new(Selector::ExploreRecursiveEdge),
+};
+
+let mut it = BlockTraversal::new(lsys, root, selector);
+
+let (cid, block) = it.next().unwrap().unwrap();
+assert_eq!(block, bytes);
+```
 */
 
 pub mod blockstore;
@@ -97,7 +124,7 @@ use std::{collections::HashSet, vec};
 use thiserror::Error;
 use unixfs::resolve_unixfs;
 
-pub use link_system::{BlockLoader, IpldLoader, LinkSystem, Prefix};
+pub use link_system::{BlockLoader, IpldLoader, LinkSystem, LoaderError, Prefix};
 pub use selector::Selector;
 
 #[derive(Error, Debug, PartialEq, Eq)]
@@ -112,10 +139,22 @@ pub enum IterError {
     Other(&'static str),
 }
 
+impl From<LoaderError> for IterError {
+    fn from(err: LoaderError) -> Self {
+        match err {
+            LoaderError::NotFound(cid) => Self::NotFound(cid),
+            LoaderError::SkipMe(cid) => Self::SkipMe(cid),
+            LoaderError::Decoding(s) => Self::Decode(s),
+            LoaderError::Codec(_) => Self::Other("invalid multicodec"),
+            LoaderError::Blockstore(_) => Self::Other("blockstore error"),
+        }
+    }
+}
+
 /// Executes an iterative traversal based on the given root CID and selector
 /// and returns the blocks resolved along the way.
 #[derive(Debug)]
-pub struct BlockIterator<L> {
+pub struct BlockTraversal<L> {
     loader: L,
     selector: Selector,
     start: Option<Cid>,
@@ -124,7 +163,7 @@ pub struct BlockIterator<L> {
     restart: bool,
 }
 
-impl<L> Iterator for BlockIterator<L>
+impl<L> Iterator for BlockTraversal<L>
 where
     L: BlockLoader,
 {
@@ -157,7 +196,7 @@ where
     }
 }
 
-impl<L> BlockIterator<L>
+impl<L> BlockTraversal<L>
 where
     L: BlockLoader,
 {
@@ -358,7 +397,12 @@ where
             }
             let node = match self.loader.load(c) {
                 Ok(node) => node,
-                Err(_) => return Some(Err(IterError::NotFound(c))),
+                Err(e) => {
+                    return match e.downcast::<LoaderError>() {
+                        Ok(e) => Some(Err(e.into())),
+                        Err(_) => Some(Err(IterError::NotFound(c))),
+                    };
+                }
             };
             *ipld = node;
             result = Some(Ok(()));
@@ -427,12 +471,13 @@ fn select_next_entries(ipld: Ipld, selector: Selector) -> Vec<(Ipld, Selector)> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::blockstore::MemoryBlockstore;
+    use crate::blockstore::{Blockstore, MemoryBlockstore};
     use crate::link_system::{LinkSystem, Prefix};
     use crate::selector::{RecursionLimit, Selector};
     use libipld::cbor::DagCborCodec;
     use libipld::ipld;
     use libipld::multihash::Code;
+    use rand::prelude::*;
 
     #[test]
     fn test_walk_next() {
@@ -462,7 +507,7 @@ mod tests {
             }),
             current: None,
         };
-        let mut it = BlockIterator::new(lsys, root, selector);
+        let mut it = BlockTraversal::new(lsys, root, selector);
 
         let (_, first) = it.next().unwrap().unwrap();
         assert_eq!(first, parent_blk);
@@ -478,6 +523,76 @@ mod tests {
 
         let end = it.next();
         assert_eq!(end, None);
+    }
+
+    #[test]
+    fn test_missing_links() {
+        let store = MemoryBlockstore::new();
+        let lsys = LinkSystem::new(store.clone());
+
+        const CHUNK_SIZE: usize = 250 * 1024;
+
+        let mut bytes = vec![0u8; 3 * CHUNK_SIZE];
+        thread_rng().fill(&mut bytes[..]);
+
+        let chunks = bytes.chunks(CHUNK_SIZE);
+
+        let links: Vec<Ipld> = chunks
+            .map(|chunk| {
+                let leaf = Ipld::Bytes(chunk.to_vec());
+                let cid = lsys
+                    .store(Prefix::new(0x55, 0x13), &leaf)
+                    .expect("link system should store leaf node");
+                let link = ipld!({
+                    "Hash": cid,
+                    "Tsize": CHUNK_SIZE,
+                });
+                link
+            })
+            .collect();
+
+        let mut missing = Vec::new();
+        // delete the last 2 blocks
+        links.iter().skip(1).for_each(|link| {
+            let _ = link.get("Hash").map(|l| {
+                if let Ipld::Link(cid) = l {
+                    store.delete_block(cid).unwrap();
+                    missing.push(*cid);
+                }
+            });
+        });
+
+        let root_node = ipld!({
+            "Links": links,
+        });
+
+        let root = lsys
+            .store(Prefix::new(0x71, 0x13), &root_node)
+            .expect("link system to store root node");
+
+        let selector = Selector::ExploreRecursive {
+            limit: RecursionLimit::None,
+            sequence: Box::new(Selector::ExploreAll {
+                next: Box::new(Selector::ExploreRecursiveEdge),
+            }),
+            current: None,
+        };
+        let mut it = IpldTraversal::new(lsys, root, selector);
+
+        let first = it.next().unwrap().unwrap();
+        assert_eq!(first, root_node);
+
+        // first chunk resolves as expected
+        let _ = it.next().unwrap().unwrap();
+
+        let result = it.next().unwrap();
+        assert_eq!(result, Err(IterError::NotFound(missing[0])));
+
+        let result = it.next().unwrap();
+        assert_eq!(result, Err(IterError::NotFound(missing[1])));
+
+        let done = it.next();
+        assert_eq!(done, None);
     }
 
     #[test]
