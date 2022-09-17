@@ -1,7 +1,7 @@
 use crate::loader::ReconciledLoader;
 use crate::messages::{DagInfo, Message, MsgWriter};
 use crate::request::{Request, RequestId};
-use crate::response::StatusCode;
+use crate::response::{Block, LinkData, StatusCode};
 use futures::{future::BoxFuture, prelude::*, stream::unfold, stream::BoxStream};
 use ipld_traversal::{
     blockstore::Blockstore, link_system::LinkSystem, BlockTraversal, IpldTraversal, IterError,
@@ -18,10 +18,11 @@ use libp2p::{
     core::connection::ConnectionId, core::transport::ListenerId, core::ConnectedPoint, Multiaddr,
     PeerId,
 };
+use rayon::prelude::*;
 use smallvec::SmallVec;
 use std::{
     collections::{HashMap, VecDeque},
-    io, iter,
+    io, iter, mem,
     pin::Pin,
     task::Context,
     task::Poll,
@@ -357,7 +358,6 @@ where
                 } => {
                     match blocks.next() {
                         Some(Ok(data)) => {
-                            // We have the block locally, continue without requesting from remote.
                             let event = GraphSyncEvent::Block { id, data };
                             self.traversals
                                 .push_back(Traversal::Remote { id, peer, blocks });
@@ -673,7 +673,7 @@ where
     type Future = future::Ready<Result<Self::Output, Self::Error>>;
 
     fn upgrade_inbound(self, socket: C, _: Self::Info) -> Self::Future {
-        future::ok(recv(socket).boxed())
+        future::ok(MsgReader::new(socket).into_stream().boxed())
     }
 }
 
@@ -715,85 +715,174 @@ fn final_event(id: RequestId, status: StatusCode) -> Option<HandlerEvent> {
     }
 }
 
-fn recv<T>(socket: T) -> impl Stream<Item = HandlerEvent>
+const DEFAULT_BLOCK_BUFFER_CAP: usize = 2 * 1024 * 1024;
+
+/// MsgReader buffers blocks until the given cap is reached so they can be hashed in parallel.
+pub struct MsgReader<S> {
+    socket: S,
+    buffer: Vec<Block>,
+    links: Vec<(RequestId, LinkData)>,
+    pending: SmallVec<[HandlerEvent; 4]>,
+    buffer_cap: usize,
+    buffer_size: usize,
+    closed: bool,
+}
+
+impl<S> MsgReader<S>
 where
-    T: AsyncWrite + AsyncRead + Unpin + Send,
+    S: AsyncRead + Unpin + Send,
 {
-    unfold(socket, |mut r| async move {
-        if let Ok(msg) = Message::from_net(&mut r).await {
-            match msg.into_inner() {
-                // Have not encountered a case where a provider would request data to a client
-                // while sending blocks for some previous request so won't handle that yet.
-                (Some(requests), _, _) => {
-                    let mut events = Vec::new();
-                    for req in requests {
-                        events.push(HandlerEvent::NewRequest(req.clone()));
-                    }
-                    return Some((events, r));
-                }
-                (_, Some(responses), Some(blocks)) => {
-                    let mut blk_map: HashMap<Cid, Vec<u8>> = HashMap::new();
-                    let mut events = Vec::new();
-                    for blk in blocks {
-                        let prefix = match Prefix::new_from_bytes(&blk.prefix) {
-                            Ok(prefix) => prefix,
-                            Err(_e) => {
-                                continue;
-                            }
-                        };
-                        let cid = match prefix.to_cid(&blk.data) {
-                            Ok(cid) => cid,
-                            Err(_e) => {
-                                continue;
-                            }
-                        };
-                        blk_map.insert(cid, blk.data);
-                    }
-                    for res in responses {
-                        if let Some(meta) = res.metadata {
-                            for data in meta {
-                                let event = match blk_map.remove(&data.link) {
-                                    Some(blk) => HandlerEvent::Partial(res.id, (data.link, blk)),
-                                    None => HandlerEvent::Missing(res.id, data.link),
-                                };
-                                events.push(event);
-                            }
-                        }
-                        if let Some(event) = final_event(res.id, res.status) {
-                            events.push(event);
-                        }
-                    }
-                    // if we still have blocks in there, the provider is faulty.
-                    debug_assert!(blk_map.is_empty());
-
-                    return Some((events, r));
-                }
-                // we could receive a response with no blocks in the case where the
-                // provider is missing some.
-                (_, Some(responses), None) => {
-                    let mut events = Vec::new();
-                    for res in responses {
-                        if let Some(meta) = res.metadata {
-                            for data in meta {
-                                events.push(HandlerEvent::Missing(res.id, data.link));
-                            }
-                        }
-                        if let Some(event) = final_event(res.id, res.status) {
-                            events.push(event);
-                        }
-                    }
-
-                    return Some((events, r));
-                }
-                _ => (),
-            };
+    pub fn new(socket: S) -> Self {
+        MsgReader {
+            socket,
+            closed: false,
+            buffer: Vec::new(),
+            links: Vec::new(),
+            pending: SmallVec::new(),
+            buffer_cap: DEFAULT_BLOCK_BUFFER_CAP,
+            buffer_size: 0,
         }
-        None
-    })
-    // flatten events so they come in one at a time
-    .flat_map(stream::iter)
-    // avoid calling unfold again on a closed pipe
-    .fuse()
+    }
+    pub fn events(&mut self) -> Vec<HandlerEvent> {
+        self.buffer_size = 0;
+        let mut blocks = mem::take(&mut self.buffer)
+            .into_par_iter()
+            .try_fold(HashMap::new, |mut acc, blk| {
+                let prefix = Prefix::new_from_bytes(&blk.prefix)?;
+                acc.insert(prefix.to_cid(&blk.data).unwrap(), blk.data);
+                Ok::<_, anyhow::Error>(acc)
+            })
+            .try_reduce(HashMap::new, |mut acc, group| {
+                acc.extend(group);
+                Ok(acc)
+            })
+            .unwrap_or_default();
+        mem::take(&mut self.links)
+            .into_iter()
+            .map(|(rid, ldata)| {
+                blocks.remove(&ldata.link).map_or_else(
+                    || HandlerEvent::Missing(rid, ldata.link),
+                    |blk| HandlerEvent::Partial(rid, (ldata.link, blk)),
+                )
+            })
+            .chain(mem::take(&mut self.pending).into_iter())
+            .collect()
+    }
+
+    pub fn next(mut self) -> Option<(Vec<HandlerEvent>, Self)> {
+        if !self.is_empty() {
+            // we still have room to buffer, unless the pipe is closed
+            // wait for more blocks to fill the capacity.
+            if self.spare_capacity() > 0 {
+                if self.closed {
+                    Some((self.events(), self))
+                } else {
+                    Some((Vec::new(), self))
+                }
+            } else {
+                Some((self.events(), self))
+            }
+        } else if self.closed {
+            None
+        } else {
+            Some((Vec::new(), self))
+        }
+    }
+
+    pub fn into_stream(self) -> impl Stream<Item = HandlerEvent> {
+        unfold(self, |mut state| async {
+            if state.closed {
+                return state.next();
+            }
+            while let Ok(msg) = Message::from_net(&mut state.socket).await {
+                match msg.into_inner() {
+                    (Some(requests), _, _) => {
+                        for req in requests {
+                            state.queue(HandlerEvent::NewRequest(req.clone()));
+                        }
+                    }
+                    (_, Some(responses), Some(blocks)) => {
+                        let links = responses
+                            .into_iter()
+                            .flat_map(|res| {
+                                if let Some(event) = final_event(res.id, res.status) {
+                                    state.queue(event);
+                                }
+
+                                if let Some(meta) = res.metadata {
+                                    meta.into_iter()
+                                        .map(|m| (res.id, m))
+                                        .collect::<Vec<(RequestId, LinkData)>>()
+                                } else {
+                                    Vec::new()
+                                }
+                            })
+                            .collect();
+                        state.injest(blocks, links);
+                    }
+                    // we could receive a response with no blocks in the case where the
+                    // provider is missing some.
+                    (_, Some(responses), None) => {
+                        for res in responses {
+                            if let Some(meta) = res.metadata {
+                                for data in meta {
+                                    state.queue(HandlerEvent::Missing(res.id, data.link));
+                                }
+                            }
+                            if let Some(event) = final_event(res.id, res.status) {
+                                state.queue(event);
+                            }
+                        }
+                    }
+                    _ => (),
+                }
+                // Wait until we've buffered some blocks to return the next state.
+                if !state.can_buffer() {
+                    return state.next();
+                }
+            }
+            state.closed = true;
+            state.next()
+        })
+        // flatten events so they come in one at a time
+        .flat_map(stream::iter)
+        .fuse()
+    }
+
+    #[inline]
+    fn is_empty(&self) -> bool {
+        self.buffer_size == 0 && self.pending.is_empty()
+    }
+
+    #[inline]
+    fn can_buffer(&self) -> bool {
+        self.spare_capacity() > 0 && !self.closed
+    }
+
+    #[inline]
+    fn spare_capacity(&self) -> usize {
+        if self.buffer_size > self.buffer_cap {
+            0
+        } else {
+            self.buffer_cap - self.buffer_size
+        }
+    }
+
+    #[inline]
+    fn queue(&mut self, event: HandlerEvent) {
+        self.pending.push(event);
+    }
+
+    #[inline]
+    fn injest(&mut self, blocks: Vec<Block>, links: Vec<(RequestId, LinkData)>) {
+        for blk in blocks {
+            self.buffer_size += blk.data.len();
+            self.buffer.push(blk);
+        }
+        for lk in links {
+            self.links.push(lk);
+        }
+    }
 }
 
 async fn send<T>(mut io: T, msg: Message) -> io::Result<()>
@@ -893,6 +982,92 @@ mod tests {
             .unwrap();
 
             bg_task.await;
+        });
+    }
+
+    #[test]
+    fn msg_reader() {
+        const CHUNK_SIZE: usize = 250 * 1024;
+
+        let mut data = vec![0u8; 4 * CHUNK_SIZE];
+        rand::thread_rng().fill_bytes(&mut data);
+
+        let store = MemoryBlockstore::new();
+        let lsys = LinkSystem::new(store.clone());
+        let chunks = data.chunks(CHUNK_SIZE);
+
+        let links: Vec<Ipld> = chunks
+            .map(|chunk| {
+                let leaf = Ipld::Bytes(chunk.to_vec());
+                // encoding as raw
+                let cid = lsys
+                    .store(Prefix::new(0x55, 0x13), &leaf)
+                    .expect("link system should store leaf node");
+                let link = ipld!({
+                    "Hash": cid,
+                    "Tsize": CHUNK_SIZE,
+                });
+                link
+            })
+            .collect();
+
+        let root_node = ipld!({
+            "Links": links,
+        });
+
+        let root = lsys
+            .store(Prefix::new(0x71, 0x13), &root_node)
+            .expect("link system to store root node");
+
+        let req = Request::new();
+        let selector = Selector::ExploreRecursive {
+            limit: RecursionLimit::None,
+            sequence: Box::new(Selector::ExploreAll {
+                next: Box::new(Selector::ExploreRecursiveEdge),
+            }),
+            current: None,
+        };
+
+        let (tx, rx) = oneshot::channel();
+
+        let _bg_task = async_std::task::spawn(async move {
+            let mut transport = TcpTransport::default();
+
+            let mut socket = transport.dial(rx.await.unwrap()).unwrap().await.unwrap();
+
+            let it = BlockTraversal::new(LinkSystem::new(store), root, selector);
+            let writer = MsgWriter::new(&mut socket);
+            let _ = writer.write(*req.id(), it).await.unwrap();
+        });
+        async_std::task::block_on(async {
+            let mut transport = TcpTransport::default().boxed();
+
+            transport
+                .listen_on("/ip4/127.0.0.1/tcp/0".parse().unwrap())
+                .unwrap();
+
+            let addr = transport
+                .next()
+                .await
+                .expect("new address event")
+                .into_new_address()
+                .expect("listen address");
+            tx.send(addr).unwrap();
+
+            let socket = transport
+                .next()
+                .await
+                .expect("request event")
+                .into_incoming()
+                .unwrap()
+                .0
+                .await
+                .unwrap();
+
+            let mut stream = Box::pin(MsgReader::new(socket).into_stream().map(|ev| Ok(ev)));
+
+            let mut drain = sink::drain();
+            drain.send_all(&mut stream).await.unwrap();
         });
     }
 

@@ -1,6 +1,6 @@
 mod loader;
-mod messages;
-mod network;
+pub mod messages;
+pub mod network;
 mod request;
 pub mod resolver;
 mod response;

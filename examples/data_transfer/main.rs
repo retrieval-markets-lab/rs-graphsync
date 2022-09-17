@@ -12,7 +12,7 @@
 /// First run a provider node with the following command:
 ///
 /// ```
-/// cargo run --example cmd_api \
+/// cargo run --example data_transfer \
 ///     provide \
 ///     --path <path-to-a-file-to-provide>
 /// ```
@@ -20,7 +20,7 @@
 /// To run a client push operation, replace the values with your own:
 ///
 /// ```
-/// cargo run --example cmd_api \
+/// cargo run --example data_transfer \
 ///     push \
 ///     --path <path-to-file-to-push> \
 ///     --peer "/ip4/127.0.0.1/tcp/53870/p2p/12D3KooWC2E2mnp5x3CfJG4n9vFXabTwSrc2PfbNWzSZhCjCN3rr"
@@ -29,7 +29,7 @@
 /// To run a client pull operation (replace with your values):
 ///
 /// ```
-/// cargo run --example cmd_api \
+/// cargo run --example data_transfer \
 ///     pull \
 ///     --path bafyreidh5nz7eoupru3o2bk4xrf4x7xcukaicfvh5xucksdfq3ara4yuja \
 ///     --peer "/ip4/127.0.0.1/tcp/53870/p2p/12D3KooWC2E2mnp5x3CfJG4n9vFXabTwSrc2PfbNWzSZhCjCN3rr"

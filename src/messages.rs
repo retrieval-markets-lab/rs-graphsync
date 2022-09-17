@@ -58,7 +58,7 @@ impl Message {
             return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
         }
         let msg: Message =
-            from_slice(&buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+            from_slice(&buf[..]).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
         Ok(msg)
     }
     pub async fn to_net<T>(self, stream: &mut T) -> io::Result<()>
