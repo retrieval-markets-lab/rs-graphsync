@@ -58,12 +58,12 @@ use libp2p::{
     core,
     core::either::EitherError,
     dns,
-    identify::{Identify, IdentifyConfig, IdentifyEvent},
+    identify::{Behaviour as Identify, Config as IdentifyConfig, Event as IdentifyEvent},
     identity, mplex,
     multiaddr::Protocol,
     noise,
-    swarm::{ConnectionHandlerUpgrErr, Swarm, SwarmBuilder, SwarmEvent},
-    tcp, websocket, Multiaddr, NetworkBehaviour, PeerId, Transport,
+    swarm::{ConnectionHandlerUpgrErr, NetworkBehaviour, Swarm, SwarmEvent},
+    tcp, websocket, Multiaddr, PeerId, Transport,
 };
 use std::{
     collections::HashMap,
@@ -81,13 +81,13 @@ async fn main() -> Result<(), anyhow::Error> {
 
     let keys = identity::Keypair::generate_ed25519();
     let transport = {
-        let dns_tcp = dns::DnsConfig::system(tcp::TcpTransport::new(
-            tcp::GenTcpConfig::new().nodelay(true),
+        let dns_tcp = dns::DnsConfig::system(tcp::async_io::Transport::new(
+            tcp::Config::new().nodelay(true),
         ))
         .await?;
         let ws_dns_tcp = websocket::WsConfig::new(
-            dns::DnsConfig::system(tcp::TcpTransport::new(
-                tcp::GenTcpConfig::new().nodelay(true),
+            dns::DnsConfig::system(tcp::async_io::Transport::new(
+                tcp::Config::new().nodelay(true),
             ))
             .await?,
         );
@@ -113,12 +113,11 @@ async fn main() -> Result<(), anyhow::Error> {
 
     let store = MemoryBlockstore::new();
 
-    let swarm = SwarmBuilder::new(
+    let swarm = Swarm::with_async_std_executor(
         transport,
         DataTransferBehaviour::new(store.clone(), keys.public()),
         peer_id,
-    )
-    .build();
+    );
 
     let (cmd_sender, cmd_receiver) = mpsc::channel(0);
     let (evt_sender, mut evt_receiver) = mpsc::channel(0);
