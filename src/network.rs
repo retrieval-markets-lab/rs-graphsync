@@ -828,7 +828,7 @@ mod tests {
     use libp2p::mplex::MplexConfig;
     use libp2p::noise;
     use libp2p::swarm::{Swarm, SwarmEvent};
-    use libp2p::tcp::{GenTcpConfig, TcpTransport};
+    use libp2p::tcp::{async_io::Transport as TcpTransport, Config as TcpConfig};
     use rand::prelude::*;
 
     #[test]
@@ -840,7 +840,7 @@ mod tests {
         let reqn = req.clone();
 
         let bg_task = async_std::task::spawn(async move {
-            let mut transport = TcpTransport::default().boxed();
+            let mut transport = TcpTransport::new(TcpConfig::default().nodelay(true)).boxed();
 
             transport
                 .listen_on("/ip4/127.0.0.1/tcp/0".parse().unwrap())
@@ -905,7 +905,7 @@ mod tests {
             .into_authentic(&id_keys)
             .unwrap();
         let pubkey = id_keys.public();
-        let transport = TcpTransport::new(GenTcpConfig::default().nodelay(true))
+        let transport = TcpTransport::new(TcpConfig::default().nodelay(true))
             .upgrade(upgrade::Version::V1)
             .authenticate(noise::NoiseConfig::xx(noise_keys).into_authenticated())
             .multiplex(MplexConfig::new())
@@ -949,7 +949,7 @@ mod tests {
             .store(Prefix::new(0x71, 0x13), &root_node)
             .expect("link system to store root node");
 
-        let mut swarm = Swarm::new(tp, GraphSync::new(store), peer_id);
+        let mut swarm = Swarm::with_async_std_executor(tp, GraphSync::new(store), peer_id);
 
         let client = swarm.behaviour_mut();
 
@@ -1016,14 +1016,14 @@ mod tests {
                 .store(Prefix::new(0x71, 0x13), &root_node)
                 .expect("link system to store root node");
 
-            let swarm = Swarm::new(transport, GraphSync::new(store), peer_id);
+            let swarm = Swarm::with_async_std_executor(transport, GraphSync::new(store), peer_id);
             (swarm, peer_id, root)
         };
         let mut swarm2 = {
             let (pubkey, transport) = transport();
             let peer_id = pubkey.to_peer_id();
             let store = MemoryBlockstore::new();
-            Swarm::new(transport, GraphSync::new(store), peer_id)
+            Swarm::with_async_std_executor(transport, GraphSync::new(store), peer_id)
         };
 
         Swarm::listen_on(&mut swarm1, "/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();
@@ -1128,14 +1128,14 @@ mod tests {
                 .store(Prefix::new(0x71, 0x13), &root_node)
                 .expect("link system to store root node");
 
-            let swarm = Swarm::new(transport, GraphSync::new(store), peer_id);
+            let swarm = Swarm::with_async_std_executor(transport, GraphSync::new(store), peer_id);
             (swarm, peer_id, root)
         };
         let mut swarm2 = {
             let (pubkey, transport) = transport();
             let peer_id = pubkey.to_peer_id();
             let store = MemoryBlockstore::new();
-            Swarm::new(transport, GraphSync::new(store), peer_id)
+            Swarm::with_async_std_executor(transport, GraphSync::new(store), peer_id)
         };
 
         Swarm::listen_on(&mut swarm1, "/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();

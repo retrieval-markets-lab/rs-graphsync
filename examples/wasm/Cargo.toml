@@ -13,11 +13,12 @@ js-sys = "0.3.59"
 wasm-bindgen-futures = "0.4.32"
 ipld_traversal = { path = "../../traversal", default_features = false }
 graphsync = { path = "../../" }
-libipld = { version = "0.13.1", features = ["serde-codec"] }
-libp2p = { version = "0.46.1", default_features = true }
+libipld = { version = "0.15.0", features = ["serde-codec"] }
+libp2p = { version = "0.50", default_features = true, features = ["mplex", "noise", "async-std"] }
 libp2p_wasm_ws = { path = "../../libp2p-wasm-ws" }
 serde = { version = "1.0", features = ["derive"] }
 getrandom = { version = "0.2", features = ["js"] }
+rustls = "0.20.7"
 
 [dependencies.web-sys]
 version = "0.3.59"

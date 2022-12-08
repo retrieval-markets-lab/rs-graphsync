@@ -1,6 +1,6 @@
 [package]
 name = "libp2p_wasm_ws"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 description = "WASM WebSockets transport for Libp2p using wasm-bindgen"
@@ -11,7 +11,7 @@ futures = "0.3.24"
 wasm-bindgen = "0.2.82"
 js-sys = "0.3.59"
 thiserror = "1.0"
-libp2p = "0.46.1"
+libp2p = { version = "0.50", default-features = false }
 parity-send-wrapper = "0.1.0"
 
 [dependencies.web-sys]

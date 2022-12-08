@@ -1,6 +1,6 @@
 [package]
 name = "ipld_traversal"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 description = "Implementation of IPLD selectors and traversal methods"
@@ -8,7 +8,7 @@ repository = "https://github.com/myelnet/rs-graphsync"
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
-libipld = { version = "0.13.1", features = ["serde-codec"] }
+libipld = { version = "0.15.0", features = ["serde-codec"] }
 serde_ipld_dagcbor = "0.1.2"
 indexmap = { version = "1.8.0", features = ["serde"] }
 smallvec = "1.8.0"
