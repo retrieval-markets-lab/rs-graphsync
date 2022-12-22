@@ -1,10 +1,10 @@
 use criterion::BenchmarkId;
 use criterion::Criterion;
-use criterion::{criterion_group, criterion_main, BatchSize, Throughput};
+use criterion::{black_box, criterion_group, criterion_main, BatchSize, Throughput};
 use ipld_traversal::{
     blockstore::MemoryBlockstore,
     selector::{RecursionLimit, Selector},
-    BlockIterator, LinkSystem, Prefix,
+    BlockIter, BlockTraversal, LinkSystem, Prefix,
 };
 use libipld::{ipld, Cid, Ipld};
 use rand::prelude::*;
@@ -51,7 +51,7 @@ fn bench_traversal(c: &mut Criterion) {
     let mut group = c.benchmark_group("traversal");
     for size in [MB, 4 * MB, 15 * MB, 60 * MB].iter() {
         group.throughput(Throughput::Bytes(*size as u64));
-        group.bench_with_input(BenchmarkId::new("data", size), size, |b, &size| {
+        group.bench_with_input(BenchmarkId::new("ipldstack", size), size, |b, &size| {
             b.iter_batched(
                 || prepare_blocks(size),
                 |(store, root)| {
@@ -62,7 +62,25 @@ fn bench_traversal(c: &mut Criterion) {
                         }),
                         current: None,
                     };
-                    BlockIterator::new(LinkSystem::new(store), root, selector).count();
+                    let count = BlockTraversal::new(LinkSystem::new(store), root, selector).count();
+                    black_box(count);
+                },
+                BatchSize::SmallInput,
+            );
+        });
+        group.bench_with_input(BenchmarkId::new("linkstack", size), size, |b, &size| {
+            b.iter_batched(
+                || prepare_blocks(size),
+                |(store, root)| {
+                    let selector = Selector::ExploreRecursive {
+                        limit: RecursionLimit::None,
+                        sequence: Box::new(Selector::ExploreAll {
+                            next: Box::new(Selector::ExploreRecursiveEdge),
+                        }),
+                        current: None,
+                    };
+                    let count = BlockIter::new(root, selector, LinkSystem::new(store)).count();
+                    black_box(count);
                 },
                 BatchSize::SmallInput,
             );

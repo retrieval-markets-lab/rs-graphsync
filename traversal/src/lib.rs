@@ -117,10 +117,16 @@ pub mod path_segment;
 pub mod selector;
 pub mod unixfs;
 
+use bytes::Bytes;
+use libipld::codec::Codec;
+use libipld::codec_impl::IpldCodec;
 use libipld::{Cid, Ipld};
 use path_segment::PathSegment;
 use smallvec::SmallVec;
-use std::{collections::HashSet, vec};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    vec,
+};
 use thiserror::Error;
 use unixfs::resolve_unixfs;
 
@@ -468,12 +474,155 @@ fn select_next_entries(ipld: Ipld, selector: Selector) -> Vec<(Ipld, Selector)> 
     }
 }
 
+pub struct SelectIpldIter<'a> {
+    stack: Vec<Box<dyn Iterator<Item = (&'a Ipld, Selector)> + 'a>>,
+}
+
+impl<'a> SelectIpldIter<'a> {
+    pub fn new(node: &'a Ipld, sel: Selector) -> Self {
+        Self {
+            stack: vec![Box::new(vec![(node, sel)].into_iter())],
+        }
+    }
+}
+
+impl<'a> Iterator for SelectIpldIter<'a> {
+    type Item = (&'a Ipld, Selector);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(iter) = self.stack.last_mut() {
+                if let Some((ipld, selector)) = iter.next() {
+                    let sel = selector.clone();
+                    if let Some(attn) = sel.interests() {
+                        self.stack
+                            .push(Box::new(attn.into_iter().filter_map(move |ps| {
+                                if let Some(next_sel) = sel.clone().explore(ipld, &ps) {
+                                    let v = match ipld.get(ps.ipld_index()) {
+                                        Ok(node) => node,
+                                        _ => return None,
+                                    };
+                                    return Some((v, next_sel));
+                                }
+                                None
+                            })));
+                    } else {
+                        match ipld {
+                            Ipld::List(list) => {
+                                self.stack.push(Box::new(list.iter().enumerate().filter_map(
+                                    move |(i, v)| {
+                                        let ps = PathSegment::from(i);
+                                        if let Some(next_sel) = sel.clone().explore(ipld, &ps) {
+                                            return Some((v, next_sel));
+                                        }
+                                        None
+                                    },
+                                )));
+                            }
+                            Ipld::Map(map) => {
+                                self.stack
+                                    .push(Box::new(map.iter().filter_map(move |(k, v)| {
+                                        let ps = PathSegment::from(k.as_ref());
+                                        if let Some(next_sel) = sel.clone().explore(ipld, &ps) {
+                                            return Some((v, next_sel));
+                                        }
+                                        None
+                                    })));
+                            }
+                            _ => {}
+                        }
+                    }
+                    return Some((ipld, selector));
+                } else {
+                    self.stack.pop();
+                }
+            } else {
+                return None;
+            }
+        }
+    }
+}
+
+pub struct TraversalValidator {
+    next: HashMap<Cid, Selector>,
+    loaded: HashSet<Cid>,
+}
+
+impl TraversalValidator {
+    pub fn new(root: Cid, sel: Selector) -> Self {
+        Self {
+            next: HashMap::from([(root, sel)]),
+            loaded: HashSet::new(),
+        }
+    }
+
+    pub fn next(&mut self, cid: &Cid, bytes: Bytes) -> anyhow::Result<()> {
+        if let Some(selector) = self.next.remove(cid) {
+            let codec = IpldCodec::try_from(cid.codec())?;
+            let node: Ipld = codec.decode(&bytes[..])?;
+
+            for (ipld, sel) in SelectIpldIter::new(&node, selector) {
+                if let Ipld::Link(cid) = ipld {
+                    if self.loaded.get(cid).is_none() {
+                        self.next.insert(cid.to_owned(), sel);
+                    }
+                }
+            }
+
+            self.loaded.insert(cid.to_owned());
+
+            Ok(())
+        } else {
+            Err(anyhow::format_err!("unknown block"))
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.next.is_empty()
+    }
+}
+
+pub struct BlockIter<L: BlockLoader> {
+    links: VecDeque<(Cid, Selector)>,
+    loader: L,
+}
+
+impl<L: BlockLoader> BlockIter<L> {
+    pub fn new(root: Cid, sel: Selector, loader: L) -> Self {
+        // reserve more capacity as we will need it for most larger sized trees
+        let mut links = VecDeque::with_capacity(16);
+        links.push_back((root, sel));
+        BlockIter { links, loader }
+    }
+}
+
+impl<L: BlockLoader> Iterator for BlockIter<L> {
+    type Item = anyhow::Result<(Cid, Vec<u8>)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some((cid, selector)) = self.links.pop_front() {
+            let (node, data) = match self.loader.load_plus_raw(cid) {
+                Ok(nb_tuple) => nb_tuple,
+                Err(_) => return Some(Err(anyhow::format_err!("not found"))),
+            };
+            for (ipld, sel) in SelectIpldIter::new(&node, selector) {
+                if let Ipld::Link(cid) = ipld {
+                    self.links.push_back((cid.to_owned(), sel));
+                }
+            }
+            return Some(Ok((cid, data)));
+        }
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::blockstore::{Blockstore, MemoryBlockstore};
     use crate::link_system::{LinkSystem, Prefix};
     use crate::selector::{RecursionLimit, Selector};
+    use indexmap::indexmap;
     use libipld::cbor::DagCborCodec;
     use libipld::ipld;
     use libipld::multihash::Code;
@@ -523,6 +672,52 @@ mod tests {
 
         let end = it.next();
         assert_eq!(end, None);
+    }
+
+    #[test]
+    fn test_walk_next_link_iter() {
+        let store = MemoryBlockstore::new();
+        let lsys = LinkSystem::new(store);
+
+        let prefix = Prefix::new(DagCborCodec.into(), Code::Sha2_256.into());
+
+        let leaf1 = ipld!({ "name": "leaf1", "size": 12 });
+        let (leaf1_cid, leaf1_blk) = lsys.store_plus_raw(prefix, &leaf1).unwrap();
+
+        // leaf2 is not present in the blockstore
+        let leaf2 = ipld!({ "name": "leaf2", "size": 6 });
+        let (leaf2_cid, leaf2_blk) = lsys.store_plus_raw(prefix, &leaf2).unwrap();
+
+        let parent = ipld!({
+            "children": [leaf1_cid, leaf2_cid],
+            "favouriteChild": leaf2_cid,
+            "name": "parent",
+        });
+        let (root, parent_blk) = lsys.store_plus_raw(prefix, &parent).unwrap();
+
+        let selector = Selector::ExploreRecursive {
+            limit: RecursionLimit::None,
+            sequence: Box::new(Selector::ExploreAll {
+                next: Box::new(Selector::ExploreRecursiveEdge),
+            }),
+            current: None,
+        };
+        let mut it = BlockIter::new(root, selector, lsys);
+
+        let (_, first) = it.next().unwrap().unwrap();
+        assert_eq!(first, parent_blk);
+
+        let (_, second) = it.next().unwrap().unwrap();
+        assert_eq!(second, leaf1_blk);
+
+        let (_, third) = it.next().unwrap().unwrap();
+        assert_eq!(third, leaf2_blk);
+
+        let (_, last) = it.next().unwrap().unwrap();
+        assert_eq!(last, leaf2_blk);
+
+        let end = it.next();
+        assert!(end.is_none());
     }
 
     #[test]
@@ -639,5 +834,119 @@ mod tests {
 
         let end = it.next();
         assert_eq!(end, None);
+    }
+
+    #[test]
+    fn test_select_ipld_iter() {
+        let leaf1 = ipld!({ "name": "leaf1", "size": 12 });
+
+        let leaf2 = ipld!({ "name": "leaf2", "size": 6 });
+
+        let parent = ipld!({
+            "children": [leaf1.clone(), leaf2.clone()],
+            "favouriteChild": leaf2.clone(),
+            "name": "parent",
+        });
+
+        let selector = Selector::ExploreRecursive {
+            limit: RecursionLimit::None,
+            sequence: Box::new(Selector::ExploreAll {
+                next: Box::new(Selector::ExploreRecursiveEdge),
+            }),
+            current: None,
+        };
+
+        let mut it = SelectIpldIter::new(&parent, selector);
+
+        let (first, _) = it.next().unwrap();
+        assert_eq!(first, &parent);
+
+        let (second, _) = it.next().unwrap();
+        assert_eq!(second, parent.get("children").unwrap());
+
+        let (third, _) = it.next().unwrap();
+        assert_eq!(third, &leaf1);
+
+        let (forth, _) = it.next().unwrap();
+        assert_eq!(forth, leaf1.get("name").unwrap());
+
+        let (fifth, _) = it.next().unwrap();
+        assert_eq!(fifth, leaf1.get("size").unwrap());
+
+        let (sixth, _) = it.next().unwrap();
+        assert_eq!(sixth, &leaf2);
+
+        let (seventh, _) = it.next().unwrap();
+        assert_eq!(seventh, leaf2.get("name").unwrap());
+    }
+
+    #[test]
+    fn test_ipld_iter_select_fields() {
+        let leaf1 = ipld!({ "name": "leaf1", "size": 12 });
+
+        let leaf2 = ipld!({ "name": "leaf2", "size": 6 });
+
+        let parent = ipld!({
+            "children": [leaf1.clone(), leaf2.clone()],
+            "favouriteChild": leaf2.clone(),
+            "name": "parent",
+        });
+
+        let selector = Selector::ExploreFields {
+            fields: indexmap! {
+                "favouriteChild".to_string() => Selector::Matcher,
+                "name".to_string() => Selector::Matcher,
+            },
+        };
+
+        let mut it = SelectIpldIter::new(&parent, selector);
+
+        let (first, _) = it.next().unwrap();
+        assert_eq!(first, &parent);
+
+        let (second, _) = it.next().unwrap();
+        assert_eq!(second, &leaf2);
+
+        let (third, _) = it.next().unwrap();
+        assert_eq!(third, parent.get("name").unwrap());
+    }
+
+    #[test]
+    fn test_validate_next() {
+        let store = MemoryBlockstore::new();
+        let lsys = LinkSystem::new(store);
+
+        let prefix = Prefix::new(DagCborCodec.into(), Code::Sha2_256.into());
+
+        let leaf1 = ipld!({ "name": "leaf1", "size": 12 });
+        let (leaf1_cid, leaf1_blk) = lsys.store_plus_raw(prefix, &leaf1).unwrap();
+
+        // leaf2 is not present in the blockstore
+        let leaf2 = ipld!({ "name": "leaf2", "size": 6 });
+        let (leaf2_cid, leaf2_blk) = lsys.store_plus_raw(prefix, &leaf2).unwrap();
+
+        let parent = ipld!({
+            "children": [leaf1_cid, leaf2_cid],
+            "favouriteChild": leaf2_cid,
+            "name": "parent",
+        });
+        let (root, parent_blk) = lsys.store_plus_raw(prefix, &parent).unwrap();
+
+        let selector = Selector::ExploreRecursive {
+            limit: RecursionLimit::None,
+            sequence: Box::new(Selector::ExploreAll {
+                next: Box::new(Selector::ExploreRecursiveEdge),
+            }),
+            current: None,
+        };
+        let mut tv = TraversalValidator::new(root, selector);
+
+        tv.next(&root, Bytes::from(parent_blk)).unwrap();
+
+        tv.next(&leaf1_cid, Bytes::from(leaf1_blk)).unwrap();
+
+        tv.next(&leaf2_cid, Bytes::from(leaf2_blk)).unwrap();
+
+        assert!(tv.is_empty());
     }
 }
