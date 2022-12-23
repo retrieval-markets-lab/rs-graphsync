@@ -4,7 +4,7 @@ version = "0.2.0"
 edition = "2021"
 license = "MIT"
 description = "Implementation of IPLD selectors and traversal methods"
-repository = "https://github.com/myelnet/rs-graphsync"
+repository = "https://github.com/retrieval-markets-lab/rs-graphsync"
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }

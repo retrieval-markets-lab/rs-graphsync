@@ -4,7 +4,7 @@ version = "0.2.0"
 edition = "2021"
 license = "MIT"
 description = "WASM WebSockets transport for Libp2p using wasm-bindgen"
-repository = "https://github.com/myelnet/rs-graphsync"
+repository = "https://github.com/retrieval-markets-lab/rs-graphsync"
 
 [dependencies]
 futures = "0.3.24"
