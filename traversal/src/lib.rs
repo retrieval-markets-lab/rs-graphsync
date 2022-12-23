@@ -117,7 +117,6 @@ pub mod path_segment;
 pub mod selector;
 pub mod unixfs;
 
-use bytes::Bytes;
 use libipld::codec::Codec;
 use libipld::codec_impl::IpldCodec;
 use libipld::{Cid, Ipld};
@@ -556,10 +555,10 @@ impl TraversalValidator {
         }
     }
 
-    pub fn next(&mut self, cid: &Cid, bytes: Bytes) -> anyhow::Result<()> {
+    pub fn next(&mut self, cid: &Cid, bytes: &[u8]) -> anyhow::Result<()> {
         if let Some(selector) = self.next.remove(cid) {
             let codec = IpldCodec::try_from(cid.codec())?;
-            let node: Ipld = codec.decode(&bytes[..])?;
+            let node: Ipld = codec.decode(bytes)?;
 
             for (ipld, sel) in SelectIpldIter::new(&node, selector) {
                 if let Ipld::Link(cid) = ipld {
@@ -941,11 +940,11 @@ mod tests {
         };
         let mut tv = TraversalValidator::new(root, selector);
 
-        tv.next(&root, Bytes::from(parent_blk)).unwrap();
+        tv.next(&root, &parent_blk[..]).unwrap();
 
-        tv.next(&leaf1_cid, Bytes::from(leaf1_blk)).unwrap();
+        tv.next(&leaf1_cid, &leaf1_blk[..]).unwrap();
 
-        tv.next(&leaf2_cid, Bytes::from(leaf2_blk)).unwrap();
+        tv.next(&leaf2_cid, &leaf2_blk[..]).unwrap();
 
         assert!(tv.is_empty());
     }
