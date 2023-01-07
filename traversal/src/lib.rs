@@ -124,6 +124,7 @@ use path_segment::PathSegment;
 use smallvec::SmallVec;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    sync::{Arc, Mutex},
     vec,
 };
 use thiserror::Error;
@@ -542,33 +543,37 @@ impl<'a> Iterator for SelectIpldIter<'a> {
     }
 }
 
+#[derive(Clone)]
 pub struct TraversalValidator {
-    next: HashMap<Cid, Selector>,
-    loaded: HashSet<Cid>,
+    next: Arc<Mutex<HashMap<Cid, Selector>>>,
+    loaded: Arc<Mutex<HashSet<Cid>>>,
 }
 
 impl TraversalValidator {
     pub fn new(root: Cid, sel: Selector) -> Self {
         Self {
-            next: HashMap::from([(root, sel)]),
-            loaded: HashSet::new(),
+            next: Arc::new(Mutex::new(HashMap::from([(root, sel)]))),
+            loaded: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
     pub fn next(&mut self, cid: &Cid, bytes: &[u8]) -> anyhow::Result<()> {
-        if let Some(selector) = self.next.remove(cid) {
+        let mut links = self.next.lock().unwrap();
+        if let Some(selector) = links.remove(cid) {
+            let mut loaded = self.loaded.lock().unwrap();
+
             let codec = IpldCodec::try_from(cid.codec())?;
             let node: Ipld = codec.decode(bytes)?;
 
             for (ipld, sel) in SelectIpldIter::new(&node, selector) {
                 if let Ipld::Link(cid) = ipld {
-                    if self.loaded.get(cid).is_none() {
-                        self.next.insert(cid.to_owned(), sel);
+                    if loaded.get(cid).is_none() {
+                        links.insert(cid.to_owned(), sel);
                     }
                 }
             }
 
-            self.loaded.insert(cid.to_owned());
+            loaded.insert(cid.to_owned());
 
             Ok(())
         } else {
@@ -577,7 +582,7 @@ impl TraversalValidator {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.next.is_empty()
+        self.next.lock().unwrap().is_empty()
     }
 }
 
